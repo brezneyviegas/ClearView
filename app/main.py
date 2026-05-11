@@ -16,7 +16,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from . import cache, telemetry
+from . import cache, teams, telemetry
 from .config import Policy, baseline_model_env, load_policy
 from .pricing import cost_for, cost_per_1k_out, drift_pct
 from .providers import claude_cli
@@ -62,7 +62,7 @@ def _symbol(model: str) -> str:
 
 # Per-process micro-cache for /admin/ticker. Key: (session, window_sec).
 # Value: (cached_at_monotonic, payload). TTL: 2s (per Idea.md spec).
-_TICKER_CACHE: dict[tuple[str | None, int], tuple[float, dict]] = {}
+_TICKER_CACHE: dict[tuple[str | None, int, str | None], tuple[float, dict]] = {}
 _TICKER_CACHE_TTL = 2.0
 
 
@@ -71,6 +71,7 @@ async def lifespan(app: FastAPI):
     global POLICY
     POLICY = load_policy()
     telemetry.init_db()
+    teams.init_db()
     cache.init_db()
     avail = build_availability(POLICY)
     for tier, models in avail.items():
@@ -189,6 +190,43 @@ def _admin_auth(request: Request) -> None:
         raise HTTPException(status_code=401, detail="invalid admin token")
 
 
+def _resolve_team(request: Request) -> teams.Team | None:
+    """Parse Authorization: Bearer cv_team_<hex> and return the matching Team.
+
+    Returns None when the header is absent (anonymous / single-tenant fallback).
+    Raises 401 when the header IS present but malformed, not a team token,
+    unknown, or the team is disabled. The resolved team is cached on
+    request.state.team so admin handlers can reuse without re-querying.
+    """
+    cached = getattr(request.state, "team", "__unset__")
+    if cached != "__unset__":
+        return cached  # may be None — already resolved this request.
+
+    auth = request.headers.get("authorization", "")
+    if not auth:
+        request.state.team = None
+        return None
+    if not auth.lower().startswith("bearer "):
+        # An Authorization header that isn't Bearer is suspicious — but keep
+        # backward compat with anonymous + admin-only paths by ignoring it
+        # unless it looks like a team token.
+        request.state.team = None
+        return None
+    token = auth.split(" ", 1)[1].strip()
+    if not token.startswith("cv_team_"):
+        # Not a team token (could be the admin token used on the admin
+        # endpoints, or a stray header). Treat as anonymous for /v1.
+        request.state.team = None
+        return None
+    t = teams.get(token)
+    if t is None:
+        raise HTTPException(status_code=401, detail="unknown team token")
+    if not t.enabled:
+        raise HTTPException(status_code=401, detail="team disabled")
+    request.state.team = t
+    return t
+
+
 @app.get("/v1/models")
 async def list_models() -> dict:
     pol = _policy()
@@ -210,6 +248,10 @@ async def chat_completions(request: Request) -> Any:
     messages = body.get("messages") or []
     if not messages:
         raise HTTPException(status_code=400, detail="messages required")
+
+    # Team identity (Bearer cv_team_*). None = anonymous (single-tenant fallback).
+    team = _resolve_team(request)
+    team_id = team.id if team else None
 
     requested = (body.get("model") or "clearview-auto").lower()
     header_tier = request.headers.get("x-clearview-tier")
@@ -238,6 +280,7 @@ async def chat_completions(request: Request) -> Any:
                 messages=messages,
                 virtual_model=requested,
                 temperature=float(body.get("temperature", 1.0) or 1.0),
+                team_id=team_id,
             )
         except Exception:
             cache_hash = None
@@ -272,6 +315,7 @@ async def chat_completions(request: Request) -> Any:
                         output_cost_per_1k=0.0,
                         latency_ms=latency_ms,
                         prompt_hash=_hash_prompt_text(_flatten_prompt(messages)),
+                        team_id=team_id,
                     ))
                     if stream:
                         return StreamingResponse(
@@ -280,8 +324,38 @@ async def chat_completions(request: Request) -> Any:
                         )
                     return JSONResponse(payload)
 
-    # --- Budget enforcement ---
-    budget_warn = False
+    # --- Budget enforcement (per-team daily → per-team monthly → global daily) ---
+    # First breach wins. Team caps always reject. Global cap still honors
+    # policy.budget.on_breach (reject/warn/allow).
+    budget_warn_scope: str | None = None
+    if team is not None:
+        if team.daily_usd_cap is not None and team.daily_usd_cap > 0:
+            spent_t = teams.today_spend(team.id)
+            cap_t = float(team.daily_usd_cap)
+            if spent_t >= cap_t:
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": "team daily budget exceeded",
+                        "spent": round(spent_t, 4),
+                        "cap": round(cap_t, 4),
+                        "scope": "team_daily",
+                    },
+                )
+        if team.monthly_usd_cap is not None and team.monthly_usd_cap > 0:
+            spent_m = teams.month_spend(team.id)
+            cap_m = float(team.monthly_usd_cap)
+            if spent_m >= cap_m:
+                return JSONResponse(
+                    status_code=429,
+                    content={
+                        "error": "team monthly budget exceeded",
+                        "spent": round(spent_m, 4),
+                        "cap": round(cap_m, 4),
+                        "scope": "team_monthly",
+                    },
+                )
+
     if pol.budget and pol.budget.daily_usd_cap > 0:
         spent = telemetry.today_spend()
         cap = float(pol.budget.daily_usd_cap)
@@ -294,10 +368,11 @@ async def chat_completions(request: Request) -> Any:
                         "error": "daily budget exceeded",
                         "spent": round(spent, 4),
                         "cap": round(cap, 4),
+                        "scope": "global_daily",
                     },
                 )
             if mode == "warn":
-                budget_warn = True
+                budget_warn_scope = "global_daily"
                 log.warning("daily budget breach: spent=%.4f cap=%.4f (mode=warn)", spent, cap)
             # mode == "allow" -> no-op
 
@@ -318,6 +393,21 @@ async def chat_completions(request: Request) -> Any:
         )
     else:
         decision = route(prompt_text, pol, header_tier=header_tier)
+
+    # --- Team tier-gating ---
+    # If the team declared an `allowed_tiers` whitelist, refuse routes that
+    # resolve to a tier outside the list. Fires AFTER routing so the operator
+    # sees which tier the prompt would have run on (helps explain refusals).
+    if team is not None and team.allowed_tiers:
+        if decision.tier not in team.allowed_tiers:
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "tier not allowed for team",
+                    "tier": decision.tier,
+                    "allowed": list(team.allowed_tiers),
+                },
+            )
 
     # Strip ClearView-only fields before forwarding
     forward_kwargs = {k: v for k, v in body.items() if k != "model"}
@@ -367,7 +457,7 @@ async def chat_completions(request: Request) -> Any:
                     break
             if chosen is None:
                 _log_failure(session_id, client_id, requested, decision, prompt_text, str(e),
-                             request_id=request_id)
+                             request_id=request_id, team_id=team_id)
                 raise HTTPException(
                     status_code=502,
                     detail=f"upstream error and no escalation target available: {e}",
@@ -383,7 +473,7 @@ async def chat_completions(request: Request) -> Any:
                 resp = _call_upstream(esc_kwargs, stream=False)
             except Exception as e2:
                 _log_failure(session_id, client_id, requested, decision, prompt_text, str(e2),
-                             request_id=request_id)
+                             request_id=request_id, team_id=team_id)
                 raise HTTPException(status_code=502, detail=f"upstream error: {e2}") from e2
             # If the original request was streaming, the escalated reply is a
             # plain chat.completion dict — finalize it as non-stream below.
@@ -391,7 +481,7 @@ async def chat_completions(request: Request) -> Any:
             use_cli_stream = False
         else:
             _log_failure(session_id, client_id, requested, decision, prompt_text, str(e),
-                         request_id=request_id)
+                         request_id=request_id, team_id=team_id)
             raise HTTPException(status_code=502, detail=f"upstream error: {e}") from e
 
     used_model = forward_kwargs["model"]
@@ -435,16 +525,24 @@ async def chat_completions(request: Request) -> Any:
                 client_id=client_id,
                 requested=requested,
                 prompt_text=prompt_text,
+                team_id=team_id,
             ))
+        # Budget-warn header: scope name (e.g. "global_daily") if a breach
+        # was tripped in warn mode; absent otherwise.
+        warn_headers = (
+            {"x-clearview-budget-warn": f"{budget_warn_scope}:true"}
+            if budget_warn_scope else None
+        )
         return StreamingResponse(
             _stream_and_log(resp, decision, session_id, client_id, requested,
                             prompt_text, started, escalated, empty_escalated, used_model,
                             used_tier,
                             request_id=request_id,
                             cache_hash=cache_hash,
-                            via_cli_stream=use_cli_stream),
+                            via_cli_stream=use_cli_stream,
+                            team_id=team_id),
             media_type="text/event-stream",
-            headers={"x-clearview-budget-warn": "true"} if budget_warn else None,
+            headers=warn_headers,
         )
 
     response, primary_request_id, primary_model = _finalize_non_stream(
@@ -453,9 +551,10 @@ async def chat_completions(request: Request) -> Any:
         used_tier,
         cache_hash=cache_hash,
         request_id=request_id,
+        team_id=team_id,
     )
-    if budget_warn:
-        response.headers["x-clearview-budget-warn"] = "true"
+    if budget_warn_scope:
+        response.headers["x-clearview-budget-warn"] = f"{budget_warn_scope}:true"
 
     # Fire-and-forget shadow call. Client already has its response — zero latency impact.
     if shadow_tier:
@@ -469,6 +568,7 @@ async def chat_completions(request: Request) -> Any:
             client_id=client_id,
             requested=requested,
             prompt_text=prompt_text,
+            team_id=team_id,
         ))
 
     return response
@@ -487,7 +587,8 @@ def _finalize_non_stream(resp: Any, decision, session_id, client_id, requested,
                          prompt_text, started, escalated, empty_escalated, used_model,
                          used_tier: str,
                          cache_hash: str | None = None,
-                         request_id: str | None = None) -> tuple[JSONResponse, str, str]:
+                         request_id: str | None = None,
+                         team_id: str | None = None) -> tuple[JSONResponse, str, str]:
     """Persist telemetry, optionally write to prompt cache, return (response, request_id, used_model)."""
     pol = _policy()
     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -528,11 +629,17 @@ def _finalize_non_stream(resp: Any, decision, session_id, client_id, requested,
         escalated=escalated or empty_escalated,
         prompt_hash=_hash_prompt_text(prompt_text),
         synth_cost_usd=synth,
+        team_id=team_id,
     )
     if request_id:
         rec_kwargs["request_id"] = request_id
     rec = telemetry.CallRecord(**rec_kwargs)
     telemetry.record(rec)
+    # Drop the team's cached spend so the next request sees this call when
+    # checking its daily/monthly cap. Skipping this could let one team race
+    # past its cap during the 5s TTL window.
+    if team_id:
+        teams.invalidate_spend_cache(team_id)
 
     # Strip ClearView-internal fields before returning to the client / caching.
     for k in [k for k in payload.keys() if isinstance(k, str) and k.startswith("_clearview_")]:
@@ -560,7 +667,8 @@ async def _stream_and_log(resp, decision, session_id, client_id, requested,
                           used_tier: str,
                           request_id: str | None = None,
                           cache_hash: str | None = None,
-                          via_cli_stream: bool = False):
+                          via_cli_stream: bool = False,
+                          team_id: str | None = None):
     """SSE-pump the upstream stream, accumulate text + usage, write telemetry,
     write the buffered text to the prompt cache on a successful single-call
     stream (i.e. no escalation), and emit a trailing `data: [DONE]\\n\\n`.
@@ -642,10 +750,13 @@ async def _stream_and_log(resp, decision, session_id, client_id, requested,
             escalated=escalated or empty_escalated,
             prompt_hash=_hash_prompt_text(prompt_text),
             synth_cost_usd=synth,
+            team_id=team_id,
         )
         if request_id:
             rec_kwargs["request_id"] = request_id
         telemetry.record(telemetry.CallRecord(**rec_kwargs))
+        if team_id:
+            teams.invalidate_spend_cache(team_id)
 
         # Buffered streaming cache: only write when this was a single-call
         # primary (no escalation) AND we have some text. The cached entry
@@ -674,7 +785,7 @@ async def _stream_and_log(resp, decision, session_id, client_id, requested,
 async def _run_shadow(*, shadow_tier: str, primary_request_id: str | None,
                       primary_model: str, messages: list[dict[str, Any]], body: dict,
                       session_id: str, client_id: str | None, requested: str,
-                      prompt_text: str) -> None:
+                      prompt_text: str, team_id: str | None = None) -> None:
     """Fire a shadow upstream call for offline cost+quality comparison.
 
     Runs after the client already has the primary response. Errors are swallowed
@@ -711,6 +822,7 @@ async def _run_shadow(*, shadow_tier: str, primary_request_id: str | None,
             consensus_flag=True,
             shadow_of=primary_request_id,
             prompt_hash=_hash_prompt_text(prompt_text),
+            team_id=team_id,
         ))
         return
 
@@ -753,11 +865,14 @@ async def _run_shadow(*, shadow_tier: str, primary_request_id: str | None,
         shadow_of=primary_request_id,
         prompt_hash=_hash_prompt_text(prompt_text),
         synth_cost_usd=synth,
+        team_id=team_id,
     ))
+    if team_id:
+        teams.invalidate_spend_cache(team_id)
 
 
 def _log_failure(session_id, client_id, requested, decision, prompt_text, err,
-                 request_id: str | None = None):
+                 request_id: str | None = None, team_id: str | None = None):
     kw = dict(
         session_id=session_id,
         client_id=client_id,
@@ -768,6 +883,7 @@ def _log_failure(session_id, client_id, requested, decision, prompt_text, err,
         route_reason=decision.reason,
         status=f"error:{err[:120]}",
         prompt_hash=_hash_prompt_text(prompt_text),
+        team_id=team_id,
     )
     if request_id:
         kw["request_id"] = request_id
@@ -781,24 +897,27 @@ def _hash_prompt_text(text: str) -> str:
 # --- admin views ---
 
 @app.get("/admin/stats")
-async def admin_stats(request: Request, session: str | None = None) -> dict:
+async def admin_stats(request: Request, session: str | None = None,
+                      team: str | None = None) -> dict:
     _admin_auth(request)
-    return telemetry.stats(session_id=session)
+    return telemetry.stats(session_id=session, team_id=team)
 
 
 @app.get("/admin/explorer", response_class=HTMLResponse)
-async def admin_explorer(request: Request, session: str | None = None):
+async def admin_explorer(request: Request, session: str | None = None,
+                         team: str | None = None):
     _admin_auth(request)
-    data = telemetry.stats(session_id=session)
+    data = telemetry.stats(session_id=session, team_id=team)
     return TEMPLATES.TemplateResponse(
         request,
         "explorer.html",
-        {"data": data, "current_session": session},
+        {"data": data, "current_session": session, "current_team": team},
     )
 
 
 @app.get("/admin/timeseries")
-async def admin_timeseries(request: Request, session: str | None = None, window: int = 60) -> dict:
+async def admin_timeseries(request: Request, session: str | None = None, window: int = 60,
+                           team: str | None = None) -> dict:
     """Bucket calls by minute over the last `window` minutes for the explorer sparklines."""
     _admin_auth(request)
     import sqlite3 as _sqlite3
@@ -813,6 +932,9 @@ async def admin_timeseries(request: Request, session: str | None = None, window:
     if session:
         where += " AND session_id = ?"
         params.append(session)
+    if team:
+        where += " AND team_id = ?"
+        params.append(team)
 
     c = _sqlite3.connect(_db_path())
     c.row_factory = _sqlite3.Row
@@ -864,14 +986,23 @@ async def admin_timeseries(request: Request, session: str | None = None, window:
 
 
 @app.get("/admin/calls_detail")
-async def admin_calls_detail(request: Request, session: str | None = None) -> dict:
+async def admin_calls_detail(request: Request, session: str | None = None,
+                             team: str | None = None) -> dict:
     """Same row set as stats(), but with session_id + prompt_hash for the modal detail view."""
     _admin_auth(request)
     import sqlite3 as _sqlite3
     from .config import db_path as _db_path
 
-    where = "WHERE session_id = ?" if session else ""
-    params: tuple = (session,) if session else ()
+    clauses: list[str] = []
+    params_l: list[Any] = []
+    if session:
+        clauses.append("session_id = ?")
+        params_l.append(session)
+    if team:
+        clauses.append("team_id = ?")
+        params_l.append(team)
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    params = tuple(params_l)
     c = _sqlite3.connect(_db_path())
     c.row_factory = _sqlite3.Row
     try:
@@ -881,7 +1012,7 @@ async def admin_calls_detail(request: Request, session: str | None = None) -> di
                    latency_ms, tokens_in, tokens_out,
                    native_cost_usd, plan_equiv_cost_usd, output_cost_per_1k,
                    route_reason, escalated, consensus_flag, shadow_of,
-                   prompt_hash, ts, virtual_model, status
+                   prompt_hash, ts, virtual_model, status, team_id
             FROM calls {where}
             ORDER BY ts DESC LIMIT 200
             """,
@@ -893,7 +1024,8 @@ async def admin_calls_detail(request: Request, session: str | None = None) -> di
 
 
 @app.get("/admin/shadow_compare")
-async def admin_shadow_compare(request: Request, session: str | None = None) -> dict:
+async def admin_shadow_compare(request: Request, session: str | None = None,
+                               team: str | None = None) -> dict:
     """Pair primary calls with their shadow counterparts.
 
     Joined via shadow.shadow_of = primary.request_id. Limited to 50 most
@@ -903,8 +1035,16 @@ async def admin_shadow_compare(request: Request, session: str | None = None) -> 
     import sqlite3 as _sqlite3
     from .config import db_path as _db_path
 
-    where = "AND s.session_id = ?" if session else ""
-    params: tuple = (session,) if session else ()
+    clauses: list[str] = []
+    params_l: list[Any] = []
+    if session:
+        clauses.append("s.session_id = ?")
+        params_l.append(session)
+    if team:
+        clauses.append("s.team_id = ?")
+        params_l.append(team)
+    where = ("AND " + " AND ".join(clauses)) if clauses else ""
+    params = tuple(params_l)
 
     c = _sqlite3.connect(_db_path())
     c.row_factory = _sqlite3.Row
@@ -961,7 +1101,7 @@ async def admin_shadow_compare(request: Request, session: str | None = None) -> 
 
 @app.get("/admin/ticker")
 async def admin_ticker(request: Request, session: str | None = None,
-                       window_sec: int = 300) -> dict:
+                       window_sec: int = 300, team: str | None = None) -> dict:
     """Bloomberg-style live cost view. See .claude/Idea.md "Cost Ticker".
 
     Shape:
@@ -976,8 +1116,9 @@ async def admin_ticker(request: Request, session: str | None = None,
     _admin_auth(request)
     window_sec = max(1, min(int(window_sec or 300), 24 * 3600))
 
-    # Process-local 2s cache to soak rapid polling.
-    cache_key = (session, window_sec)
+    # Process-local 2s cache to soak rapid polling. Keyed on (session, window, team)
+    # so an operator pivoting from "all" to "team X" view doesn't see stale rows.
+    cache_key = (session, window_sec, team)
     now = time.time()
     cached = _TICKER_CACHE.get(cache_key)
     if cached and (now - cached[0]) < _TICKER_CACHE_TTL:
@@ -990,8 +1131,15 @@ async def admin_ticker(request: Request, session: str | None = None,
     prev_start = now - 2 * window_sec
     burn_start = now - 60.0
 
-    where_session = " AND session_id = ?" if session else ""
-    params_session: list[Any] = [session] if session else []
+    where_extras = ""
+    params_session: list[Any] = []
+    if session:
+        where_extras += " AND session_id = ?"
+        params_session.append(session)
+    if team:
+        where_extras += " AND team_id = ?"
+        params_session.append(team)
+    where_session = where_extras
 
     c = _sqlite3.connect(_db_path())
     c.row_factory = _sqlite3.Row
@@ -1152,6 +1300,111 @@ async def health() -> dict:
     return {"status": "ok"}
 
 
+# --- Team admin endpoints ----------------------------------------------------
+#
+# All gated by CLEARVIEW_ADMIN_TOKEN (when set) via _admin_auth. The team's
+# `id` (which IS the Bearer token used by clients) is returned in full ONLY on
+# create — listing redacts it to a short prefix to avoid leaking tokens via
+# operator logs / shoulder-surfing in the explorer.
+
+def _team_to_full_dict(t: teams.Team) -> dict:
+    return {
+        "id": t.id,
+        "name": t.name,
+        "daily_usd_cap": t.daily_usd_cap,
+        "monthly_usd_cap": t.monthly_usd_cap,
+        "allowed_tiers": list(t.allowed_tiers),
+        "created_ts": t.created_ts,
+        "enabled": t.enabled,
+    }
+
+
+def _team_to_redacted_dict(t: teams.Team) -> dict:
+    """List view: never returns the full Bearer token. Show prefix for
+    operator-side identification only."""
+    return {
+        "id_short": (t.id[:18] + "...") if len(t.id) > 18 else t.id,
+        "name": t.name,
+        "daily_usd_cap": t.daily_usd_cap,
+        "monthly_usd_cap": t.monthly_usd_cap,
+        "allowed_tiers": list(t.allowed_tiers),
+        "created_ts": t.created_ts,
+        "enabled": t.enabled,
+    }
+
+
+@app.post("/admin/teams")
+async def admin_create_team(request: Request) -> dict:
+    _admin_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    name = (body or {}).get("name")
+    if not name or not isinstance(name, str):
+        raise HTTPException(status_code=400, detail="name required")
+    allowed = body.get("allowed_tiers")
+    if allowed is not None and not isinstance(allowed, list):
+        raise HTTPException(status_code=400, detail="allowed_tiers must be a list")
+    try:
+        t = teams.create(
+            name=name,
+            daily_usd_cap=body.get("daily_usd_cap"),
+            monthly_usd_cap=body.get("monthly_usd_cap"),
+            allowed_tiers=allowed,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    return _team_to_full_dict(t)
+
+
+@app.get("/admin/teams")
+async def admin_list_teams(request: Request) -> dict:
+    _admin_auth(request)
+    return {"teams": [_team_to_redacted_dict(t) for t in teams.list_all()]}
+
+
+@app.patch("/admin/teams/{team_id}")
+async def admin_update_team(team_id: str, request: Request) -> dict:
+    _admin_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body or {}
+    # Distinguish "field absent" from "field set to null" — caller may want to
+    # clear a cap by sending {"daily_usd_cap": null}.
+    set_daily = "daily_usd_cap" in body
+    set_monthly = "monthly_usd_cap" in body
+    set_tiers = "allowed_tiers" in body
+    enabled_val = body.get("enabled") if "enabled" in body else None
+    if "allowed_tiers" in body and body["allowed_tiers"] is not None and \
+            not isinstance(body["allowed_tiers"], list):
+        raise HTTPException(status_code=400, detail="allowed_tiers must be a list")
+    t = teams.update(
+        team_id,
+        daily_usd_cap=body.get("daily_usd_cap"),
+        monthly_usd_cap=body.get("monthly_usd_cap"),
+        allowed_tiers=body.get("allowed_tiers"),
+        enabled=(bool(enabled_val) if enabled_val is not None else None),
+        _set_daily=set_daily,
+        _set_monthly=set_monthly,
+        _set_tiers=set_tiers,
+    )
+    if t is None:
+        raise HTTPException(status_code=404, detail="team not found")
+    return _team_to_full_dict(t)
+
+
+@app.delete("/admin/teams/{team_id}")
+async def admin_delete_team(team_id: str, request: Request) -> dict:
+    _admin_auth(request)
+    ok = teams.delete(team_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="team not found")
+    return {"deleted": team_id}
+
+
 # --- Prometheus metrics ---
 
 def _prom_escape_label(v: str) -> str:
@@ -1163,13 +1416,14 @@ async def metrics() -> PlainTextResponse:
     snap = telemetry.metrics_snapshot()
     lines: list[str] = []
 
-    lines.append("# HELP clearview_requests_total Total upstream requests by tier/provider/status.")
+    lines.append("# HELP clearview_requests_total Total upstream requests by tier/provider/status/team.")
     lines.append("# TYPE clearview_requests_total counter")
-    for (tier, provider, status), count in sorted(snap["buckets"].items()):
+    for (tier, provider, status, team_id), count in sorted(snap["buckets"].items()):
         lbl = (
             f'tier="{_prom_escape_label(tier)}",'
             f'provider="{_prom_escape_label(provider)}",'
-            f'status="{_prom_escape_label(status)}"'
+            f'status="{_prom_escape_label(status)}",'
+            f'team_id="{_prom_escape_label(team_id)}"'
         )
         lines.append(f"clearview_requests_total{{{lbl}}} {count}")
 

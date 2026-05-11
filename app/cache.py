@@ -64,13 +64,19 @@ def ttl_sec() -> float:
         return _DEFAULT_TTL_SEC
 
 
-def hash_key(messages: list[dict[str, Any]], virtual_model: str, temperature: float) -> str:
+def hash_key(messages: list[dict[str, Any]], virtual_model: str, temperature: float,
+             team_id: str | None = None) -> str:
     """Deterministic sha256 over the request fields that affect output.
 
     Excludes stream/user/metadata — they don't change the model's output.
+
+    `team_id` is folded in so teams can't replay each other's cached prompts.
+    Anonymous traffic (no Bearer header) shares a single cache namespace
+    (team_id=None) — preserves single-tenant behavior when no teams exist.
     """
     payload = json.dumps(
-        {"messages": messages, "model": virtual_model, "temperature": temperature},
+        {"messages": messages, "model": virtual_model, "temperature": temperature,
+         "team": team_id},
         sort_keys=True,
         default=str,
     )

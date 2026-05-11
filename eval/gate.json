@@ -1,0 +1,8 @@
+{
+  "_comment": "CI regression thresholds for the eval harness. Routing thresholds apply in both dry and live runs; cost thresholds (max_native_total_usd, min_drift_pct) and classifier accuracy are evaluated only when --live is set. See eval/run_eval.py::gate.",
+  "min_overall_accuracy_pct": 80,
+  "min_rule_accuracy_pct": 95,
+  "min_classifier_accuracy_pct": 60,
+  "max_native_total_usd": 0.50,
+  "min_drift_pct": 30
+}

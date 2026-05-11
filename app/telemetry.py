@@ -48,6 +48,8 @@ _MIGRATIONS: list[str] = [
     "ALTER TABLE calls ADD COLUMN shadow_of TEXT",
     "ALTER TABLE calls ADD COLUMN synth_cost_usd REAL NOT NULL DEFAULT 0",
     "ALTER TABLE calls ADD COLUMN picked_tier TEXT",
+    # team_id is nullable: anonymous (no Bearer header) calls stay supported.
+    "ALTER TABLE calls ADD COLUMN team_id TEXT",
 ]
 
 
@@ -73,6 +75,7 @@ class CallRecord:
     shadow_of: str | None = None
     synth_cost_usd: float = 0.0
     picked_tier: str | None = None
+    team_id: str | None = None
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     ts: float = field(default_factory=time.time)
 
@@ -109,8 +112,8 @@ def record(call: CallRecord) -> None:
                 tokens_in, tokens_out,
                 native_cost_usd, plan_equiv_cost_usd, drift_pct, output_cost_per_1k,
                 latency_ms, escalated, consensus_flag, status, prompt_hash, shadow_of,
-                synth_cost_usd, picked_tier
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                synth_cost_usd, picked_tier, team_id
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 call.request_id, call.session_id, call.ts, call.client_id, call.virtual_model,
@@ -121,6 +124,7 @@ def record(call: CallRecord) -> None:
                 call.shadow_of,
                 float(call.synth_cost_usd or 0.0),
                 call.picked_tier,
+                call.team_id,
             ),
         )
 
@@ -158,9 +162,10 @@ def metrics_snapshot() -> dict:
         rows = c.execute(
             """
             SELECT picked_tier, picked_provider, picked_model, status,
+                   COALESCE(team_id, 'anon') AS team_id,
                    COUNT(*) AS n
             FROM calls
-            GROUP BY picked_tier, picked_provider, picked_model, status
+            GROUP BY picked_tier, picked_provider, picked_model, status, team_id
             """
         ).fetchall()
 
@@ -168,9 +173,10 @@ def metrics_snapshot() -> dict:
     plan_equiv = float(agg["plan_equiv_total"] or 0.0)
     drift = ((plan_equiv - native) / plan_equiv * 100.0) if plan_equiv > 0 else 0.0
 
-    # Bucket per (picked_tier, provider, status). picked_tier is now a first-class
-    # column written at route time — no more route_reason substring grepping.
-    buckets: dict[tuple[str, str, str], int] = {}
+    # Bucket per (picked_tier, provider, status, team_id). picked_tier is a
+    # first-class column written at route time; team_id was added when teams
+    # landed (NULL → "anon" for back-compat single-tenant traffic).
+    buckets: dict[tuple[str, str, str, str], int] = {}
     for r in rows:
         provider = r["picked_provider"] or "unknown"
         status = r["status"] or "ok"
@@ -178,7 +184,8 @@ def metrics_snapshot() -> dict:
         if status.startswith("error"):
             status = "error"
         tier = r["picked_tier"] or "unknown"
-        key = (tier, provider, status)
+        team = r["team_id"] or "anon"
+        key = (tier, provider, status, team)
         buckets[key] = buckets.get(key, 0) + int(r["n"] or 0)
 
     return {
@@ -186,15 +193,28 @@ def metrics_snapshot() -> dict:
         "plan_equiv_total": plan_equiv,
         "tokens_out_total": int(agg["tokens_out"] or 0),
         "drift_pct": drift,
-        "buckets": buckets,  # dict[(tier, provider, status)] -> count
+        "buckets": buckets,  # dict[(tier, provider, status, team_id)] -> count
     }
 
 
-def stats(session_id: str | None = None) -> dict:
-    """Aggregate KPIs + per-call rows for explorer."""
+def stats(session_id: str | None = None, team_id: str | None = None) -> dict:
+    """Aggregate KPIs + per-call rows for explorer.
+
+    Both filters are AND-combined. `team_id` scopes aggregates AND the row list
+    so the explorer view only sees the team's own calls when an admin pivots
+    to a specific team.
+    """
     with _conn() as c:
-        where = "WHERE session_id = ?" if session_id else ""
-        params: tuple = (session_id,) if session_id else ()
+        clauses: list[str] = []
+        params: list = []
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if team_id:
+            clauses.append("team_id = ?")
+            params.append(team_id)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        params_t = tuple(params)
 
         agg = c.execute(
             f"""
@@ -210,7 +230,7 @@ def stats(session_id: str | None = None) -> dict:
                 COALESCE(SUM(CASE WHEN picked_model = 'cache' THEN plan_equiv_cost_usd ELSE 0 END), 0) AS cache_savings_usd
             FROM calls {where}
             """,
-            params,
+            params_t,
         ).fetchone()
 
         rows = c.execute(
@@ -218,11 +238,11 @@ def stats(session_id: str | None = None) -> dict:
             SELECT request_id, picked_provider, picked_model, picked_tier,
                    latency_ms, tokens_in, tokens_out,
                    native_cost_usd, plan_equiv_cost_usd, output_cost_per_1k,
-                   route_reason, escalated, consensus_flag, shadow_of, ts
+                   route_reason, escalated, consensus_flag, shadow_of, ts, team_id
             FROM calls {where}
             ORDER BY ts DESC LIMIT 200
             """,
-            params,
+            params_t,
         ).fetchall()
 
         sessions = c.execute(

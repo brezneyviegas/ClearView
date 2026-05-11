@@ -280,6 +280,138 @@
     text-decoration-style: dotted;
   }
   .primary-link:hover { color: var(--text); }
+
+  /* ---- Ticker symbol drill-down panel ---- */
+  .td-scrim {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.4);
+    z-index: 90;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 200ms ease-out;
+  }
+  .td-scrim.open { opacity: 1; pointer-events: auto; }
+  .td-panel {
+    position: fixed; top: 0; right: 0; bottom: 0;
+    width: 440px; max-width: 100vw;
+    background: var(--panel);
+    border-left: 1px solid var(--line);
+    z-index: 100;
+    transform: translateX(100%);
+    transition: transform 200ms ease-out;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+  .td-panel.open { transform: translateX(0); }
+  .td-panel h2 {
+    margin: 0; padding: 14px 18px; border-bottom: 1px solid var(--line);
+    font-size: 12px; letter-spacing: .12em; color: var(--muted);
+    text-transform: uppercase;
+    display: flex; justify-content: space-between; align-items: center;
+    font-weight: 500;
+  }
+  .td-close {
+    background: transparent; border: none; color: var(--muted);
+    font-size: 20px; cursor: pointer; padding: 0; line-height: 1;
+  }
+  .td-close:hover { color: var(--text); }
+  .td-body {
+    flex: 1; overflow-y: auto;
+  }
+  .td-section {
+    padding: 14px 18px; border-bottom: 1px solid var(--line);
+  }
+  .td-section:last-child { border-bottom: none; }
+  .td-section-title {
+    color: var(--muted); font-size: 10px; letter-spacing: .12em;
+    text-transform: uppercase; margin-bottom: 10px;
+  }
+  .td-header-strip {
+    padding: 16px 18px; border-bottom: 1px solid var(--line);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .td-sym-row {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  }
+  .td-sym {
+    font-family: var(--mono); font-size: 22px; font-weight: 600;
+    letter-spacing: .04em;
+  }
+  .td-model-id {
+    color: var(--muted); font-family: var(--mono); font-size: 11px;
+    word-break: break-all;
+  }
+  .td-px-row {
+    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
+    font-family: var(--mono);
+  }
+  .td-px { font-size: 20px; color: var(--text); }
+  .td-delta { font-size: 13px; }
+  .td-delta.up { color: var(--accent); }
+  .td-delta.down { color: var(--pink); }
+  .td-delta.flat { color: var(--muted); }
+  .td-meta-row {
+    display: flex; gap: 16px; font-family: var(--mono); font-size: 11px;
+    color: var(--muted); flex-wrap: wrap;
+  }
+  .td-meta-row b { color: var(--text); font-weight: 500; }
+  .td-tape-list {
+    list-style: none; margin: 0; padding: 0;
+    font-family: var(--mono); font-size: 11px;
+  }
+  .td-tape-list li {
+    display: grid;
+    grid-template-columns: 70px 1fr;
+    gap: 6px 10px;
+    padding: 8px 0;
+    border-bottom: 1px dashed var(--line);
+    cursor: pointer;
+  }
+  .td-tape-list li:last-child { border-bottom: none; }
+  .td-tape-list li:hover { background: rgba(65,217,133,.04); }
+  .td-tape-time { color: var(--muted); }
+  .td-tape-main { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+  .td-tape-main .td-cost-native { color: var(--text); }
+  .td-tape-main .td-cost-synth  { color: var(--muted); }
+  .td-tape-main .td-cost-plan   { color: var(--warn); }
+  .td-tape-main .td-reason      { color: var(--muted); }
+  .td-tape-main .td-latency     { color: var(--muted); }
+  .td-tape-empty {
+    color: var(--muted); font-family: var(--mono); font-size: 11px;
+    padding: 12px 0;
+  }
+  .td-cmp-table {
+    width: 100%; border-collapse: collapse;
+    font-family: var(--mono); font-size: 11px;
+  }
+  .td-cmp-table th, .td-cmp-table td {
+    text-align: left; padding: 6px 8px; border-bottom: 1px dashed var(--line);
+  }
+  .td-cmp-table th {
+    color: var(--muted); letter-spacing: .08em;
+    text-transform: uppercase; font-size: 9px; font-weight: 500;
+  }
+  .td-cmp-table td.num, .td-cmp-table th.num { text-align: right; }
+  .td-cmp-row-this td { color: var(--text); }
+  .td-cmp-row-cheapest td { color: var(--accent); }
+  .td-cmp-row-baseline td { color: var(--warn); }
+  .td-candle-empty {
+    color: var(--muted); font-family: var(--mono); font-size: 11px;
+    padding: 16px 0; text-align: center;
+  }
+  .td-svg { width: 100%; height: 200px; display: block; }
+  .depth-sym { cursor: pointer; }
+  .depth-sym:hover .depth-model { color: var(--accent); }
+  .lb-list li { cursor: pointer; }
+  .lb-list li.lb-empty { cursor: default; }
+  .lb-list li:not(.lb-empty):hover { background: rgba(65,217,133,.04); }
+  @keyframes td-slide-in {
+    from { transform: translateX(100%); }
+    to   { transform: translateX(0); }
+  }
+  @media (max-width: 520px) {
+    .td-panel { width: 100vw; }
+  }
 </style>
 </head>
 <body data-session="{{ current_session or '' }}">
@@ -447,6 +579,43 @@
   </div>
 </main>
 
+<div class="td-scrim" id="td-scrim" aria-hidden="true"></div>
+<aside class="td-panel" id="td-panel" role="dialog" aria-modal="true" aria-labelledby="td-title" aria-hidden="true">
+  <h2><span id="td-title">TICKER DETAIL</span><button class="td-close" id="td-close" aria-label="Close">&times;</button></h2>
+  <div class="td-body">
+    <div class="td-header-strip">
+      <div class="td-sym-row">
+        <span class="td-sym" id="td-sym">—</span>
+        <span id="td-tier-pill"></span>
+      </div>
+      <div class="td-model-id" id="td-model">—</div>
+      <div class="td-px-row">
+        <span class="td-px" id="td-px">$—</span>
+        <span class="td-delta flat" id="td-delta">─</span>
+      </div>
+      <div class="td-meta-row">
+        <span>CALLS <b id="td-calls">0</b></span>
+        <span>SPEND <b id="td-spend">$0.000</b></span>
+      </div>
+    </div>
+    <div class="td-section">
+      <div class="td-section-title">CANDLES · 1-MIN OHLC</div>
+      <div id="td-candle-wrap"><div class="td-candle-empty">no candle data in window</div></div>
+    </div>
+    <div class="td-section">
+      <div class="td-section-title">TRADE TAPE · LAST 20</div>
+      <ul class="td-tape-list" id="td-tape"><li class="td-tape-empty">no trades in window</li></ul>
+    </div>
+    <div class="td-section">
+      <div class="td-section-title">SIDE-BY-SIDE</div>
+      <table class="td-cmp-table" id="td-cmp">
+        <thead><tr><th></th><th>MODEL</th><th class="num">$/1K OUT</th><th class="num">&Delta;</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </div>
+</aside>
+
 <dialog id="detail">
   <div class="dlg-head">
     <h3>Call detail</h3>
@@ -514,7 +683,11 @@
   let lastBurnRate = {};          // last numeric values for tick anim
   let tickerEnabled = true;       // disabled if /admin/ticker 401s
   let lastTapePayload = [];       // most recent tape entries (for click drill-down)
+  let lastTickerPayload = null;   // full last /admin/ticker payload (for drill-down candles)
+  let lastDetailRows = [];        // ordered last calls_detail rows (for trade tape, last 20 per model)
   let shadowCompareEnabled = true;
+  // Drill-down panel state. selectedSymbol == null when closed.
+  let selectedSymbol = null;      // { picked_model, symbol } | null
 
   function fmtTs(ts) {
     if (!ts) return "—";
@@ -802,7 +975,7 @@
       const tier = (tapeEntry && tierForTapeEntry(tapeEntry)) || tierFromModelId(model);
       const symCls = tier ? ` sym-${tier}` : "";
       html += `<div class="depth-row">`
-        + `<div class="depth-sym"><span class="${symCls.trim()}">${escapeHTML(sym)}</span><span class="depth-model">${escapeHTML(model)}</span></div>`
+        + `<div class="depth-sym" data-model="${escapeAttr(model)}" data-symbol="${escapeAttr(sym)}"><span class="${symCls.trim()}">${escapeHTML(sym)}</span><span class="depth-model">${escapeHTML(model)}</span></div>`
         + `<div>${renderCandleSVG(arr)}</div>`
         + `</div>`;
     }
@@ -878,7 +1051,7 @@
         const sym = escapeHTML(b.symbol || symbolForModel(b.model, tape));
         const spend = "$" + Number(b.spend_usd || 0).toFixed(3);
         const calls = Number(b.calls || 0);
-        return `<li><span><span class="lb-sym">${sym}</span><span class="lb-meta">${calls} calls</span></span><span class="lb-val warn">${spend}</span></li>`;
+        return `<li data-model="${escapeAttr(b.model || "")}" data-symbol="${sym}"><span><span class="lb-sym">${sym}</span><span class="lb-meta">${calls} calls</span></span><span class="lb-val warn">${spend}</span></li>`;
       }).join("");
     }
     if (savers.length === 0) {
@@ -888,7 +1061,7 @@
         const sym = escapeHTML(s.symbol || symbolForModel(s.model, tape));
         const saved = "$" + Number(s.saved_vs_baseline_usd || 0).toFixed(3);
         const calls = Number(s.calls || 0);
-        return `<li><span><span class="lb-sym">${sym}</span><span class="lb-meta">${calls} calls</span></span><span class="lb-val">+${saved}</span></li>`;
+        return `<li data-model="${escapeAttr(s.model || "")}" data-symbol="${sym}"><span><span class="lb-sym">${sym}</span><span class="lb-meta">${calls} calls</span></span><span class="lb-val">+${saved}</span></li>`;
       }).join("");
     }
   }
@@ -1053,9 +1226,11 @@
       // Build detail map first so click handler has it.
       detailRows = {};
       for (const r of detailR.rows) detailRows[r.request_id] = r;
+      lastDetailRows = detailR.rows || [];
       renderTable(statsR.rows);
       renderCharts(tsR);
       if (tickerR) {
+        lastTickerPayload = tickerR;
         renderTicker(tickerR.tape);
         renderBurnRate(tickerR.burn_rate);
         renderCandles(tickerR.candles, tickerR.tape);
@@ -1065,6 +1240,7 @@
         renderMarketPill(null, statsR.kpis);
       }
       if (shadowCompareEnabled) renderShadowCompare(shadowR);
+      if (selectedSymbol) renderTickerDetail();
       markRefreshed();
     } catch (e) {
       // Swallow — keep polling.
@@ -1225,11 +1401,273 @@
   const _origOpenDetail = openDetail;
   openDetail = function(rid) { resetDialogTitleForRow(); _origOpenDetail(rid); };
 
+  // Ticker-cell now opens the slide-out drill-down panel (richer than the
+  // legacy modal-based openModelDetail; that helper is kept for future use).
   document.getElementById("ticker-tape").addEventListener("click", (e) => {
     const cell = e.target.closest(".ticker-cell");
     if (!cell) return;
-    openModelDetail(cell.dataset.symbol, cell.dataset.model);
+    openTickerDetail(cell.dataset.model, cell.dataset.symbol);
   });
+
+  // Depth-row label click → drill-down for that model.
+  document.getElementById("depth-container").addEventListener("click", (e) => {
+    const lbl = e.target.closest(".depth-sym[data-model]");
+    if (!lbl) return;
+    openTickerDetail(lbl.dataset.model, lbl.dataset.symbol);
+  });
+
+  // Leaderboard row clicks → drill-down for that model.
+  function leaderboardClick(e) {
+    const li = e.target.closest("li[data-model]");
+    if (!li || !li.dataset.model) return;
+    openTickerDetail(li.dataset.model, li.dataset.symbol);
+  }
+  document.getElementById("lb-burners").addEventListener("click", leaderboardClick);
+  document.getElementById("lb-savers").addEventListener("click", leaderboardClick);
+
+  // ---- Ticker drill-down panel ----
+  const tdPanel = document.getElementById("td-panel");
+  const tdScrim = document.getElementById("td-scrim");
+
+  function openTickerDetail(picked_model, symbol) {
+    if (!picked_model) return;
+    const sym = symbol || symbolForModel(picked_model, lastTapePayload);
+    selectedSymbol = { picked_model, symbol: sym };
+    renderTickerDetail();
+    tdPanel.classList.add("open");
+    tdScrim.classList.add("open");
+    tdPanel.setAttribute("aria-hidden", "false");
+    tdScrim.setAttribute("aria-hidden", "false");
+  }
+  function closeTickerDetail() {
+    selectedSymbol = null;
+    tdPanel.classList.remove("open");
+    tdScrim.classList.remove("open");
+    tdPanel.setAttribute("aria-hidden", "true");
+    tdScrim.setAttribute("aria-hidden", "true");
+  }
+  document.getElementById("td-close").addEventListener("click", closeTickerDetail);
+  tdScrim.addEventListener("click", closeTickerDetail);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && selectedSymbol) closeTickerDetail();
+  });
+
+  // Click a trade-tape row → reuse existing per-call modal.
+  document.getElementById("td-tape").addEventListener("click", (e) => {
+    const li = e.target.closest("li[data-request-id]");
+    if (!li) return;
+    const rid = li.dataset.requestId;
+    if (rid && detailRows[rid]) openDetail(rid);
+  });
+
+  function renderTickerDetail() {
+    if (!selectedSymbol) return;
+    const { picked_model, symbol } = selectedSymbol;
+    const tape = lastTapePayload || [];
+    const tapeEntry = tape.find(e => e.model === picked_model) || {};
+    const tier = tierForTapeEntry(tapeEntry) || tierFromModelId(picked_model);
+
+    // Header strip
+    document.getElementById("td-sym").textContent = symbol || "?";
+    document.getElementById("td-sym").className = "td-sym" + (tier ? " sym-" + tier : "");
+    document.getElementById("td-model").textContent = picked_model;
+    document.getElementById("td-tier-pill").innerHTML = tierPillHTML(tier);
+    document.getElementById("td-px").textContent = fmtPx(tapeEntry.price_per_1k_out || 0);
+    const dp = Number(tapeEntry.delta_pct || 0);
+    const dir = tapeEntry.direction || "flat";
+    const arr = arrowFor(dir);
+    const dpStr = (dp === 0 || dir === "flat") ? "" :
+                  ((dp > 0 ? "+" : "") + dp.toFixed(1) + "%");
+    const deltaEl = document.getElementById("td-delta");
+    deltaEl.className = "td-delta " + (dir === "up" ? "up" : (dir === "down" ? "down" : "flat"));
+    deltaEl.textContent = arr.ch + (dpStr ? " " + dpStr : "");
+    const modelCalls = (lastDetailRows || []).filter(r => r.picked_model === picked_model);
+    const callsWin = tapeEntry.calls_window !== undefined ? tapeEntry.calls_window : modelCalls.length;
+    document.getElementById("td-calls").textContent = callsWin;
+    document.getElementById("td-spend").textContent =
+      "$" + Number(tapeEntry.spend_window_usd || 0).toFixed(4);
+
+    // Candle chart (full-width, ~200px tall, with current-price dashed line)
+    renderDetailCandles(picked_model, tapeEntry.price_per_1k_out || 0);
+
+    // Trade tape (last 20 for this model)
+    renderDetailTape(picked_model);
+
+    // Side-by-side comparison
+    renderDetailCompare(picked_model);
+  }
+
+  function renderDetailCandles(picked_model, currentPx) {
+    const wrap = document.getElementById("td-candle-wrap");
+    const candles = (lastTickerPayload && lastTickerPayload.candles
+      && lastTickerPayload.candles[picked_model]) || null;
+    if (!candles || candles.length === 0) {
+      wrap.innerHTML = '<div class="td-candle-empty">no candle data in window — model below top-5 activity</div>';
+      return;
+    }
+    wrap.innerHTML = renderDetailCandleSVG(candles, currentPx);
+  }
+
+  function renderDetailCandleSVG(candles, currentPx) {
+    const W = 420, H = 200, padL = 44, padR = 52, padT = 10, padB = 22;
+    const innerW = W - padL - padR;
+    const innerH = H - padT - padB;
+    const n = candles.length;
+    const slot = innerW / Math.max(n, 1);
+    const bodyW = Math.max(2, Math.min(14, slot * 0.7));
+
+    let lo = Infinity, hi = -Infinity;
+    for (const c of candles) {
+      if (c.low  < lo) lo = c.low;
+      if (c.high > hi) hi = c.high;
+    }
+    if (currentPx && isFinite(currentPx)) {
+      if (currentPx < lo) lo = currentPx;
+      if (currentPx > hi) hi = currentPx;
+    }
+    if (!isFinite(lo) || !isFinite(hi) || lo === hi) {
+      const m = isFinite(lo) ? lo : 0;
+      lo = m * 0.95 - 0.001;
+      hi = m * 1.05 + 0.001;
+    }
+    const yFor = v => padT + innerH - ((v - lo) / (hi - lo)) * innerH;
+
+    let body = "";
+    // gridlines + left-axis price labels
+    for (let i = 0; i < 4; i++) {
+      const v = lo + (hi - lo) * (i / 3);
+      const y = yFor(v);
+      body += `<line x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}" stroke="rgba(31,38,45,.6)" stroke-width="1"/>`;
+      body += `<text x="${padL - 6}" y="${y + 3}" fill="#8b95a1" font-family="ui-monospace,Menlo,monospace" font-size="9" text-anchor="end">$${v.toFixed(3)}</text>`;
+    }
+    // x-axis time labels
+    const stride = Math.max(1, Math.floor(n / 6));
+    for (let i = 0; i < n; i += stride) {
+      const x = padL + i * slot + slot / 2;
+      const ts = candles[i].ts;
+      const d = new Date(ts * 1000);
+      const lbl = String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0");
+      body += `<text x="${x}" y="${H - 6}" fill="#8b95a1" font-family="ui-monospace,Menlo,monospace" font-size="9" text-anchor="middle">${lbl}</text>`;
+    }
+    // candles
+    for (let i = 0; i < n; i++) {
+      const c = candles[i];
+      const cx = padL + i * slot + slot / 2;
+      const isUp = c.close <= c.open;
+      const color = isUp ? "#41d985" : "#ff6b9d";
+      const yH = yFor(c.high), yL = yFor(c.low);
+      const yO = yFor(c.open), yC = yFor(c.close);
+      const yTop = Math.min(yO, yC);
+      const yBot = Math.max(yO, yC);
+      const h = Math.max(1, yBot - yTop);
+      body += `<line x1="${cx}" x2="${cx}" y1="${yH}" y2="${yL}" stroke="${color}" stroke-width="1"/>`;
+      body += `<rect x="${cx - bodyW/2}" y="${yTop}" width="${bodyW}" height="${h}" fill="${color}" opacity="0.85"/>`;
+    }
+    // current-price dashed line + right-axis label
+    if (currentPx && isFinite(currentPx)) {
+      const yPx = yFor(currentPx);
+      body += `<line x1="${padL}" x2="${W - padR}" y1="${yPx}" y2="${yPx}" stroke="#e6edf3" stroke-width="1" stroke-dasharray="4,3" opacity="0.6"/>`;
+      body += `<rect x="${W - padR + 2}" y="${yPx - 8}" width="${padR - 4}" height="16" fill="#1f262d" stroke="#e6edf3" stroke-width="1" opacity="0.9"/>`;
+      body += `<text x="${W - padR / 2}" y="${yPx + 3}" fill="#e6edf3" font-family="ui-monospace,Menlo,monospace" font-size="9" text-anchor="middle">${fmtPx(currentPx)}</text>`;
+    }
+    return `<svg class="td-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${body}</svg>`;
+  }
+
+  function renderDetailTape(picked_model) {
+    const ul = document.getElementById("td-tape");
+    const matches = (lastDetailRows || [])
+      .filter(r => r.picked_model === picked_model)
+      .slice(0, 20);
+    if (matches.length === 0) {
+      ul.innerHTML = '<li class="td-tape-empty">no trades in window</li>';
+      return;
+    }
+    let html = "";
+    for (const r of matches) {
+      const d = new Date(Number(r.ts || 0) * 1000);
+      const hh = String(d.getHours()).padStart(2, "0");
+      const mm = String(d.getMinutes()).padStart(2, "0");
+      const ss = String(d.getSeconds()).padStart(2, "0");
+      const tin  = Number(r.tokens_in  || 0);
+      const tout = Number(r.tokens_out || 0);
+      const nat  = Number(r.native_cost_usd || 0);
+      const syn  = Number(r.synth_cost_usd  || 0);
+      const plan = Number(r.plan_equiv_cost_usd || 0);
+      const lat  = (Number(r.latency_ms || 0) / 1000).toFixed(2) + "s";
+      const reason = r.route_reason || "";
+      const synthPart = syn > 0 ? `<span class="td-cost-synth">syn $${syn.toFixed(4)}</span>` : "";
+      html += `<li data-request-id="${escapeAttr(r.request_id)}">`
+        + `<span class="td-tape-time">${hh}:${mm}:${ss}</span>`
+        + `<span class="td-tape-main">`
+        +   `<span>${tin}/${tout}t</span>`
+        +   `<span class="td-cost-native">$${nat.toFixed(4)}</span>`
+        +   synthPart
+        +   `<span class="td-cost-plan">plan $${plan.toFixed(4)}</span>`
+        +   `<span class="td-latency">${lat}</span>`
+        +   (reason ? `<span class="td-reason">${escapeHTML(reason)}</span>` : "")
+        + `</span>`
+        + `</li>`;
+    }
+    ul.innerHTML = html;
+  }
+
+  function renderDetailCompare(picked_model) {
+    const tbody = document.querySelector("#td-cmp tbody");
+    const tape = lastTapePayload || [];
+    const thisEntry = tape.find(e => e.model === picked_model);
+    const thisPx = thisEntry ? Number(thisEntry.price_per_1k_out || 0) : 0;
+
+    // Cheapest = lowest price_per_1k_out > 0 in tape (excluding this model).
+    let cheapest = null;
+    for (const e of tape) {
+      const px = Number(e.price_per_1k_out || 0);
+      if (px <= 0) continue;
+      if (!cheapest || px < Number(cheapest.price_per_1k_out || Infinity)) {
+        cheapest = e;
+      }
+    }
+    // Baseline = Opus plan-equiv per-1k-out. Approximate from detailRows where
+    // picked_model contains "opus" — use plan_equiv_cost_usd / (tokens_out/1k).
+    let basePxSum = 0, basePxN = 0, baseModel = null;
+    for (const r of (lastDetailRows || [])) {
+      const m = String(r.picked_model || "").toLowerCase();
+      if (!m.includes("opus")) continue;
+      const tout = Number(r.tokens_out || 0);
+      const plan = Number(r.plan_equiv_cost_usd || 0);
+      if (tout <= 0 || plan <= 0) continue;
+      basePxSum += plan / (tout / 1000.0);
+      basePxN += 1;
+      if (!baseModel) baseModel = r.picked_model;
+    }
+    const basePx = basePxN > 0 ? basePxSum / basePxN : 0;
+
+    function fmtDelta(a, b) {
+      if (!b) return '<span class="sc-diff-zero">—</span>';
+      const d = ((a - b) / b) * 100.0;
+      const cls = d > 0 ? "sc-diff-pos" : (d < 0 ? "sc-diff-neg" : "sc-diff-zero");
+      const s = (d > 0 ? "+" : "") + d.toFixed(1) + "%";
+      return `<span class="${cls}">${s}</span>`;
+    }
+
+    const rows = [
+      { cls: "td-cmp-row-this",     lbl: "THIS",     model: picked_model,
+        px: thisPx, delta: '<span class="sc-diff-zero">—</span>' },
+      { cls: "td-cmp-row-cheapest", lbl: "CHEAPEST",
+        model: cheapest ? cheapest.model : "—",
+        px: cheapest ? Number(cheapest.price_per_1k_out || 0) : 0,
+        delta: cheapest ? fmtDelta(thisPx, Number(cheapest.price_per_1k_out || 0)) : "—" },
+      { cls: "td-cmp-row-baseline", lbl: "BASELINE",
+        model: baseModel || "opus (plan-eq)",
+        px: basePx,
+        delta: basePx > 0 ? fmtDelta(thisPx, basePx) : "—" },
+    ];
+    tbody.innerHTML = rows.map(r =>
+      `<tr class="${r.cls}"><td>${r.lbl}</td>`
+      + `<td>${escapeHTML(r.model || "—")}</td>`
+      + `<td class="num">${r.px > 0 ? fmtPx(r.px) : "—"}</td>`
+      + `<td class="num">${r.delta}</td></tr>`
+    ).join("");
+  }
 
   // ---- Boot ----
   pollOnce();    // immediate refresh of charts/detail rows
