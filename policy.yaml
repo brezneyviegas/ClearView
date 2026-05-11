@@ -1,0 +1,74 @@
+# ClearView routing policy
+# Tier order: cheap -> mid -> frontier
+tiers:
+  cheap:
+    - anthropic/claude-haiku-4-5
+    - openai/gpt-4o-mini
+    - gemini/gemini-1.5-flash
+    - ollama/llama3.2
+  mid:
+    - anthropic/claude-sonnet-4-6
+    - openai/gpt-4o
+    - gemini/gemini-1.5-pro
+  frontier:
+    - anthropic/claude-opus-4-7
+    - openai/gpt-4o
+
+# Rule engine (top-down, first match wins)
+rules:
+  - name: explicit_override
+    if: { header: x-clearview-tier }
+    then: header_value
+  - name: tiny_prompt
+    if: { tokens_lt: 200, no_code: true }
+    then: cheap
+  - name: complex_keywords
+    if:
+      contains_any:
+        - refactor
+        - architect
+        - prove
+        - derive
+        - debug this stack
+        - design system
+    then: mid
+  - name: long_prompt
+    if: { tokens_gte: 4000 }
+    then: frontier
+  - name: medium_prompt
+    if: { tokens_lt: 1500 }
+    then: cheap
+
+# Classifier fallback (when no rule matches)
+classifier:
+  enabled: true
+  model: anthropic/claude-haiku-4-5
+  prompt: |
+    Rate the complexity of the user prompt below on scale 1-5.
+    1-2 = trivial (rename, format, simple Q).
+    3 = moderate (small bug, short script).
+    4 = hard (multi-file refactor, design choice).
+    5 = expert (proof, architecture, novel algorithm).
+    Output ONLY the digit. No explanation.
+    PROMPT:
+    {prompt}
+  score_to_tier:
+    1: cheap
+    2: cheap
+    3: mid
+    4: mid
+    5: frontier
+
+# Escalation on failure / low confidence
+escalation:
+  on_error: true
+  on_empty_response: true
+  max_retries: 1
+
+# Budget guard
+budget:
+  daily_usd_cap: 50.0
+  on_breach: reject  # reject | warn | allow
+
+# Baseline used for plan-equiv cost (drift % calculation)
+baseline_model: anthropic/claude-opus-4-7

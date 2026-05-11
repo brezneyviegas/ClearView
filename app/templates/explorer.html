@@ -1,0 +1,1240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>ClearView · Cost Explorer</title>
+<style>
+  :root {
+    --bg: #0d0f12; --panel: #14181d; --line: #1f262d;
+    --text: #e6edf3; --muted: #8b95a1; --accent: #41d985; --warn: #ffb84d; --pink: #ff6b9d;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  header { padding: 18px 24px; display: flex; align-items: center; gap: 16px;
+           border-bottom: 1px solid var(--line); }
+  .pill { background: var(--panel); border: 1px solid var(--line); border-radius: 999px;
+          padding: 6px 14px; font-family: var(--mono); font-size: 12px; }
+  .pill .check { color: var(--accent); margin-right: 6px; }
+  .progress { flex: 1; height: 4px; background: var(--line); border-radius: 999px; overflow: hidden; }
+  .progress > div { height: 100%; background: var(--accent); transition: width .3s; }
+  .meta { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .header-actions { display: flex; gap: 10px; align-items: center; }
+  .btn { background: var(--panel); border: 1px solid var(--line); color: var(--text);
+         padding: 6px 12px; border-radius: 6px; font-family: var(--mono); font-size: 12px;
+         cursor: pointer; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.warn { color: var(--warn); border-color: rgba(255,184,77,.4); }
+  .btn.accent { color: var(--accent); border-color: rgba(65,217,133,.4); }
+  .refresh-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+                 background: var(--accent); margin-right: 6px; vertical-align: middle;
+                 box-shadow: 0 0 6px var(--accent); transition: background .3s, box-shadow .3s; }
+  .refresh-dot.paused { background: var(--muted); box-shadow: none; }
+  main { padding: 24px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+           margin-bottom: 18px; }
+  .panel h2 { margin: 0; padding: 14px 18px; border-bottom: 1px solid var(--line);
+              font-size: 12px; letter-spacing: .12em; color: var(--muted); text-transform: uppercase;
+              display: flex; justify-content: space-between; align-items: center; }
+  .h2-meta { color: var(--muted); font-family: var(--mono); font-weight: normal; letter-spacing: 0; }
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; }
+  .kpi { padding: 18px 22px; border-right: 1px solid var(--line); }
+  .kpi:last-child { border-right: none; }
+  .kpi-label { color: var(--muted); font-size: 11px; letter-spacing: .12em;
+               text-transform: uppercase; display: flex; align-items: center; gap: 8px; }
+  .kpi-val { font-family: var(--mono); font-size: 28px; margin-top: 6px; }
+  .kpi-sub { color: var(--muted); font-size: 11px; margin-top: 4px; font-family: var(--mono); }
+  .badge { display: inline-block; background: rgba(255,184,77,.15); color: var(--warn);
+           border: 1px solid rgba(255,184,77,.4); border-radius: 4px;
+           padding: 2px 6px; font-size: 10px; font-family: var(--mono); margin-left: 8px; }
+  .charts { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 0; }
+  .chart-cell { padding: 16px 18px; border-right: 1px solid var(--line); }
+  .chart-cell:last-child { border-right: none; }
+  .chart-title { color: var(--muted); font-size: 10px; letter-spacing: .12em;
+                 text-transform: uppercase; margin-bottom: 10px; }
+  .chart-wrap { position: relative; height: 120px; }
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; letter-spacing: .08em;
+       padding: 10px 16px; border-bottom: 1px solid var(--line); text-transform: uppercase; font-size: 10px; }
+  td { padding: 12px 16px; border-bottom: 1px solid var(--line); }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: rgba(65,217,133,.04); }
+  tbody tr:last-child td { border-bottom: none; }
+  td.num { text-align: right; }
+  th.num { text-align: right; }
+  .dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+         background: var(--pink); margin-right: 8px; vertical-align: middle; }
+  .esc-flag { color: var(--warn); font-size: 10px; margin-left: 6px; }
+  .session-tabs { display: flex; gap: 8px; margin-bottom: 18px; flex-wrap: wrap; align-items: center; }
+  .session-tabs a, .session-tabs button { color: var(--muted); text-decoration: none; padding: 6px 12px;
+                    border: 1px solid var(--line); border-radius: 6px;
+                    font-family: var(--mono); font-size: 12px;
+                    background: transparent; cursor: pointer; }
+  .session-tabs a.active { color: var(--text); border-color: var(--accent); }
+  .session-tabs a:hover, .session-tabs button:hover { color: var(--text); }
+  .session-tabs .new-session { color: var(--accent); border-color: rgba(65,217,133,.4); }
+  .empty { padding: 32px 28px; color: var(--muted); }
+  .empty h3 { margin: 0 0 8px; color: var(--text); font-weight: 500; font-size: 14px; }
+  .empty pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+               padding: 14px 16px; overflow-x: auto; font-family: var(--mono); font-size: 12px;
+               color: var(--text); margin: 12px 0 0; }
+  .empty code { color: var(--accent); }
+
+  dialog#detail {
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: 10px; padding: 0;
+    width: min(640px, 90vw); max-height: 80vh;
+  }
+  dialog#detail::backdrop { background: rgba(0,0,0,.6); }
+  dialog#detail .dlg-head { padding: 14px 18px; border-bottom: 1px solid var(--line);
+                            display: flex; justify-content: space-between; align-items: center; }
+  dialog#detail .dlg-head h3 { margin: 0; font-size: 12px; letter-spacing: .12em;
+                               color: var(--muted); text-transform: uppercase; font-weight: 500; }
+  dialog#detail .dlg-body { padding: 16px 18px; overflow-y: auto; max-height: calc(80vh - 56px); }
+  dialog#detail dl { display: grid; grid-template-columns: 140px 1fr; gap: 8px 14px;
+                     margin: 0; font-family: var(--mono); font-size: 12px; }
+  dialog#detail dt { color: var(--muted); text-transform: uppercase; font-size: 10px;
+                     letter-spacing: .08em; padding-top: 2px; }
+  dialog#detail dd { margin: 0; word-break: break-all; }
+  dialog#detail .close-x { background: transparent; border: none; color: var(--muted);
+                           font-size: 18px; cursor: pointer; padding: 0; }
+  dialog#detail .close-x:hover { color: var(--text); }
+
+  /* ---- Cost Ticker surfaces ---- */
+  .ticker-tape {
+    background: var(--panel);
+    border-bottom: 1px solid var(--line);
+    overflow: hidden;
+    position: relative;
+    height: 36px;
+    width: 100%;
+  }
+  .ticker-track {
+    display: inline-flex;
+    white-space: nowrap;
+    animation: ticker-scroll 30s linear infinite;
+    will-change: transform;
+    height: 36px;
+    align-items: center;
+  }
+  .ticker-tape:hover .ticker-track { animation-play-state: paused; }
+  .ticker-cell {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 18px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    cursor: pointer;
+    border-right: 1px solid var(--line);
+    height: 100%;
+  }
+  .ticker-cell:hover { background: rgba(65,217,133,.05); }
+  .ticker-cell .sym { color: var(--text); font-weight: 600; letter-spacing: .04em; }
+  .ticker-cell .px { color: var(--muted); }
+  .ticker-cell .arr-up { color: var(--accent); }
+  .ticker-cell .arr-down { color: var(--pink); }
+  .ticker-cell .arr-flat { color: var(--muted); }
+  .ticker-cell.pulse { animation: pulse-flash 1s ease-out 1; }
+  .ticker-empty { padding: 0 24px; color: var(--muted); font-family: var(--mono);
+                  font-size: 12px; line-height: 36px; }
+
+  @keyframes ticker-scroll {
+    0%   { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+  }
+  @keyframes pulse-flash {
+    0%   { opacity: 1; background: rgba(65,217,133,.18); }
+    50%  { opacity: .4; }
+    100% { opacity: 1; background: transparent; }
+  }
+  @keyframes burn-flash {
+    0%   { text-shadow: 0 0 12px var(--accent); }
+    100% { text-shadow: none; }
+  }
+
+  .burn-rate {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.2;
+  }
+  .burn-rate .br-row { display: flex; gap: 8px; align-items: baseline; }
+  .burn-rate .br-val {
+    font-size: 14px;
+    color: var(--text);
+    text-shadow: 0 0 6px rgba(65,217,133,.3);
+  }
+  .burn-rate .br-val.saved { color: var(--accent); text-shadow: 0 0 8px rgba(65,217,133,.5); }
+  .burn-rate .br-val.plan { color: var(--warn); }
+  .burn-rate .br-val.synth { color: var(--muted); text-shadow: none; }
+  .burn-rate .br-lbl { color: var(--muted); font-size: 10px; letter-spacing: .08em; }
+  .burn-rate .br-val.tick { animation: burn-flash .8s ease-out 1; }
+
+  /* Market depth (candles) */
+  .depth-row {
+    display: grid;
+    grid-template-columns: 90px 1fr;
+    align-items: center;
+    border-bottom: 1px solid var(--line);
+    padding: 6px 16px;
+    height: 110px;
+  }
+  .depth-row:last-child { border-bottom: none; }
+  .depth-sym {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    letter-spacing: .04em;
+  }
+  .depth-sym .depth-model { display: block; color: var(--muted); font-size: 10px; margin-top: 2px; }
+  .depth-svg { width: 100%; height: 100px; display: block; }
+  .depth-empty { padding: 24px; color: var(--muted); font-family: var(--mono); font-size: 12px; }
+
+  /* Leaderboard */
+  .leaderboard { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+  .lb-col { padding: 14px 18px; border-right: 1px solid var(--line); }
+  .lb-col:last-child { border-right: none; }
+  .lb-title { color: var(--muted); font-size: 10px; letter-spacing: .12em;
+              text-transform: uppercase; margin-bottom: 10px; }
+  .lb-list { list-style: none; margin: 0; padding: 0; font-family: var(--mono); font-size: 12px; }
+  .lb-list li { display: flex; justify-content: space-between; padding: 6px 0;
+                border-bottom: 1px dashed var(--line); }
+  .lb-list li:last-child { border-bottom: none; }
+  .lb-list .lb-sym { color: var(--text); font-weight: 600; }
+  .lb-list .lb-val { color: var(--accent); }
+  .lb-list .lb-val.warn { color: var(--warn); }
+  .lb-list .lb-meta { color: var(--muted); margin-left: 8px; }
+  .lb-empty { color: var(--muted); font-family: var(--mono); font-size: 12px;
+              padding: 6px 0; }
+
+  /* Market pill states */
+  .pill .check.closed { color: var(--muted); }
+
+  /* Tier pills */
+  .tier-pill {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: .06em;
+    border: 1px solid;
+    line-height: 1.4;
+  }
+  .tier-pill.tier-cheap    { color: var(--accent); border-color: rgba(65,217,133,.4); background: rgba(65,217,133,.08); }
+  .tier-pill.tier-mid      { color: var(--warn);   border-color: rgba(255,184,77,.4); background: rgba(255,184,77,.08); }
+  .tier-pill.tier-frontier { color: var(--pink);   border-color: rgba(255,107,157,.4); background: rgba(255,107,157,.08); }
+  .tier-pill.tier-cache    { color: var(--muted);  border-color: var(--line); background: transparent; }
+  .tier-none { color: var(--muted); }
+
+  /* Shadow badge */
+  .shadow-badge {
+    display: inline-block;
+    border-radius: 4px;
+    padding: 1px 6px;
+    margin-right: 6px;
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: .08em;
+    color: var(--pink);
+    background: rgba(255,107,157,.12);
+    border: 1px solid rgba(255,107,157,.45);
+  }
+  tr.is-shadow { opacity: 0.85; }
+
+  /* Tier-colored depth/tape labels */
+  .sym-cheap    { color: var(--accent); }
+  .sym-mid      { color: var(--warn); }
+  .sym-frontier { color: var(--pink); }
+  .sym-cache    { color: var(--muted); }
+
+  .tape-tier-dot {
+    display: inline-block;
+    width: 4px; height: 4px; border-radius: 50%;
+    background: var(--muted);
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+  .tape-tier-dot.tier-cheap    { background: var(--accent); }
+  .tape-tier-dot.tier-mid      { background: var(--warn); }
+  .tape-tier-dot.tier-frontier { background: var(--pink); }
+  .tape-tier-dot.tier-cache    { background: var(--muted); }
+
+  /* Shadow compare panel */
+  .sc-empty { padding: 18px 22px; color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .sc-model { color: var(--text); font-weight: 600; }
+  .sc-cost  { color: var(--muted); margin-left: 6px; }
+  .sc-diff-pos { color: var(--pink); }
+  .sc-diff-neg { color: var(--accent); }
+  .sc-diff-zero { color: var(--muted); }
+  .primary-link {
+    color: var(--accent);
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-style: dotted;
+  }
+  .primary-link:hover { color: var(--text); }
+</style>
+</head>
+<body data-session="{{ current_session or '' }}">
+
+<header>
+  <div class="pill" id="status-pill"><span class="check" id="status-check">&#10003;</span><span id="status-label">{{ (current_session or "ALL")|upper }}</span> · <span id="status-state">{{ "DONE" if data.kpis.calls else "WAITING" }}</span></div>
+  <div class="progress"><div id="progress-bar" style="width: {{ '100' if data.kpis.calls else '0' }}%"></div></div>
+  <div class="meta"><span id="progress-meta">{{ data.kpis.calls }} / {{ data.kpis.calls }} complete</span></div>
+  <div class="burn-rate" id="burn-rate" aria-label="Burn rate">
+    <div class="br-row"><span class="br-val" id="br-native">$—/min</span><span class="br-lbl">NATIVE</span></div>
+    <div class="br-row"><span class="br-val plan" id="br-plan">$—/min</span><span class="br-lbl">PLAN-EQUIV</span></div>
+    <div class="br-row"><span class="br-val saved" id="br-saved">$—/min</span><span class="br-lbl">SAVED</span></div>
+    <div class="br-row" id="br-synth-row" style="display:none;"><span class="br-val synth" id="br-synth">$—/min</span><span class="br-lbl">SYNTH (sub)</span></div>
+  </div>
+  <div class="header-actions">
+    <span class="meta"><span class="refresh-dot" id="refresh-dot"></span><span id="last-refresh">just now</span></span>
+    <button class="btn" id="pause-btn">PAUSE</button>
+  </div>
+</header>
+
+<div class="ticker-tape" id="ticker-tape" aria-label="Cost ticker tape">
+  <div class="ticker-track" id="ticker-track">
+    <span class="ticker-empty">awaiting first poll…</span>
+  </div>
+</div>
+
+<main>
+  <div class="session-tabs" id="session-tabs">
+    <a href="/admin/explorer" class="{% if not current_session %}active{% endif %}">All</a>
+    {% for s in data.sessions %}
+      <a href="/admin/explorer?session={{ s.session_id }}"
+         class="{% if current_session == s.session_id %}active{% endif %}"
+         data-session-id="{{ s.session_id }}">
+        {{ s.session_id }} · <span class="sess-n">{{ s.n }}</span>
+      </a>
+    {% endfor %}
+    <button class="new-session" id="new-session-btn">+ New session</button>
+  </div>
+
+  <div class="panel">
+    <h2>
+      <span>&#128279; COST COMPARE</span>
+      <span class="h2-meta" id="cost-meta">{{ data.kpis.calls }} calls · {{ '%.1f'|format(data.kpis.tokens_out / 1000) }}k tok · no consensus claimed</span>
+    </h2>
+
+    <div class="kpis" id="kpis">
+      <div class="kpi">
+        <div class="kpi-label">
+          &#128279; NATIVE TOTAL
+          <span id="kpi-via-sub" style="{% if (data.kpis.synth_total or 0) <= 0 %}display:none;{% endif %}color:var(--accent);font-family:var(--mono);font-size:10px;letter-spacing:.08em;">&middot; VIA SUB</span>
+        </div>
+        <div class="kpi-val" id="kpi-native">${{ '%.3f'|format(data.kpis.native_total) }}</div>
+        <div class="kpi-sub">
+          <span id="kpi-native-sub">{{ data.kpis.calls }} of {{ data.kpis.calls }}</span>
+          <span id="kpi-synth-sub" style="{% if (data.kpis.synth_total or 0) <= 0 %}display:none;{% endif %}">&nbsp;&middot; synth ${{ '%.3f'|format(data.kpis.synth_total or 0) }}</span>
+        </div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">
+          &#128279; PLAN-EQUIV TOTAL
+          <span class="badge" id="kpi-drift-badge" style="{% if data.kpis.drift_pct <= 0 %}display:none;{% endif %}"><span id="kpi-drift">{{ data.kpis.drift_pct }}</span>% SAVED VS NATIVE</span>
+        </div>
+        <div class="kpi-val" style="color: var(--warn)" id="kpi-plan">${{ '%.3f'|format(data.kpis.plan_equiv_total) }}</div>
+        <div class="kpi-sub"><span id="kpi-plan-sub">{{ data.kpis.calls }} of {{ data.kpis.calls }}</span></div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">&#9889; TOKENS OUT</div>
+        <div class="kpi-val" id="kpi-tokens-out">{{ '%.1f'|format(data.kpis.tokens_out / 1000) }}k</div>
+        <div class="kpi-sub"><span id="kpi-tokens-in">{{ data.kpis.tokens_in }}</span> in</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">&#128176; BEST $/1K OUT</div>
+        <div class="kpi-val" id="kpi-best">{{ '<$0.01' if data.kpis.best_cost_per_1k < 0.01 else '$%.2f'|format(data.kpis.best_cost_per_1k) }}</div>
+        <div class="kpi-sub">cheapest call</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2><span>&#128200; LAST 60 MIN</span><span class="h2-meta">bucketed per minute</span></h2>
+    <div class="charts">
+      <div class="chart-cell">
+        <div class="chart-title">SPEND ($) — NATIVE vs PLAN-EQUIV</div>
+        <div class="chart-wrap"><canvas id="chart-spend"></canvas></div>
+      </div>
+      <div class="chart-cell">
+        <div class="chart-title">CALLS / MIN</div>
+        <div class="chart-wrap"><canvas id="chart-calls"></canvas></div>
+      </div>
+      <div class="chart-cell">
+        <div class="chart-title">DRIFT % (SAVINGS)</div>
+        <div class="chart-wrap"><canvas id="chart-drift"></canvas></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2><span>&#128221; PER-CALL</span><span class="h2-meta">click any row for detail</span></h2>
+    <div id="table-container">
+      {% if data.rows %}
+      <table>
+        <thead>
+          <tr>
+            <th>VOICE</th>
+            <th>TIER</th>
+            <th>MODEL</th>
+            <th>REASON</th>
+            <th class="num">TIME</th>
+            <th class="num">IN TOK</th>
+            <th class="num">OUT TOK</th>
+            <th class="num">NATIVE $</th>
+            <th class="num">PLAN-EQUIV $</th>
+            <th class="num">$/1K OUT</th>
+          </tr>
+        </thead>
+        <tbody id="rows-body">
+          {% for r in data.rows %}
+          <tr data-request-id="{{ r.request_id }}"{% if r.consensus_flag %} class="is-shadow"{% endif %}>
+            <td>{% if r.consensus_flag %}<span class="shadow-badge">SHADOW</span>{% endif %}<span class="dot"></span>{{ (r.picked_provider or 'unknown')|upper }}</td>
+            <td>{% if r.picked_tier %}<span class="tier-pill tier-{{ r.picked_tier }}">{{ r.picked_tier|upper }}</span>{% else %}<span class="tier-none">—</span>{% endif %}</td>
+            <td>{{ r.picked_model }}</td>
+            <td style="color: var(--muted)">{{ r.route_reason }}{% if r.escalated %}<span class="esc-flag">ESC</span>{% endif %}</td>
+            <td class="num">{{ '%.1fs'|format(r.latency_ms / 1000) }}</td>
+            <td class="num">{{ r.tokens_in }}</td>
+            <td class="num">{{ r.tokens_out }}</td>
+            <td class="num">${{ '%.3f'|format(r.native_cost_usd) }}</td>
+            <td class="num">${{ '%.3f'|format(r.plan_equiv_cost_usd) }}</td>
+            <td class="num">{{ '<$0.01' if r.output_cost_per_1k < 0.01 else '$%.3f'|format(r.output_cost_per_1k) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      {% include "_empty.html" %}
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2><span>&#128202; MARKET DEPTH</span><span class="h2-meta" id="depth-meta">1-min OHLC · top 5 models</span></h2>
+    <div id="depth-container">
+      <div class="depth-empty">no candles yet — waiting for trades</div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2><span>&#127942; LEADERBOARD</span><span class="h2-meta">window rollup</span></h2>
+    <div class="leaderboard">
+      <div class="lb-col">
+        <div class="lb-title">&#128293; TOP BURNERS</div>
+        <ul class="lb-list" id="lb-burners"><li class="lb-empty">no trades in window</li></ul>
+      </div>
+      <div class="lb-col">
+        <div class="lb-title">&#128176; TOP SAVERS</div>
+        <ul class="lb-list" id="lb-savers"><li class="lb-empty">no trades in window</li></ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel" id="shadow-compare-panel">
+    <h2><span>&#128253; A/B SHADOW COMPARE</span><span class="h2-meta" id="shadow-compare-meta">primary vs shadow · last 50 pairs</span></h2>
+    <div id="shadow-compare-container">
+      <div class="sc-empty">no shadow comparisons recorded — set x-clearview-shadow: &lt;tier&gt; header</div>
+    </div>
+  </div>
+</main>
+
+<dialog id="detail">
+  <div class="dlg-head">
+    <h3>Call detail</h3>
+    <button class="close-x" id="dlg-close" aria-label="Close">&times;</button>
+  </div>
+  <div class="dlg-body">
+    <dl id="detail-dl"></dl>
+  </div>
+</dialog>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+(function () {
+  const SESSION = document.body.dataset.session || "";
+  const qs = SESSION ? "?session=" + encodeURIComponent(SESSION) : "";
+  const POLL_MS = 5000;
+
+  // ---- Chart setup ----
+  const COMMON_OPTS = {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { ticks: { color: "#8b95a1", font: { size: 9 }, maxTicksLimit: 6 },
+           grid: { color: "rgba(31,38,45,.6)" } },
+      y: { ticks: { color: "#8b95a1", font: { size: 9 } },
+           grid: { color: "rgba(31,38,45,.6)" }, beginAtZero: true },
+    },
+  };
+
+  const spendChart = new Chart(document.getElementById("chart-spend"), {
+    type: "line",
+    data: {
+      labels: [],
+      datasets: [
+        { label: "Native $", data: [], borderColor: "#41d985", backgroundColor: "rgba(65,217,133,.1)",
+          tension: .25, pointRadius: 0, borderWidth: 2 },
+        { label: "Plan-equiv $", data: [], borderColor: "#ffb84d", backgroundColor: "rgba(255,184,77,.1)",
+          tension: .25, pointRadius: 0, borderWidth: 2, borderDash: [4, 3] },
+      ],
+    },
+    options: { ...COMMON_OPTS, plugins: { legend: { display: true, labels: { color: "#8b95a1", font: { size: 10 }, boxWidth: 10 } } } },
+  });
+
+  const callsChart = new Chart(document.getElementById("chart-calls"), {
+    type: "bar",
+    data: { labels: [], datasets: [{ data: [], backgroundColor: "#ff6b9d", borderWidth: 0 }] },
+    options: COMMON_OPTS,
+  });
+
+  const driftChart = new Chart(document.getElementById("chart-drift"), {
+    type: "line",
+    data: { labels: [], datasets: [{ data: [], borderColor: "#41d985",
+                                     backgroundColor: "rgba(65,217,133,.15)",
+                                     fill: true, tension: .25, pointRadius: 0, borderWidth: 2 }] },
+    options: COMMON_OPTS,
+  });
+
+  // ---- Detail row store ----
+  let detailRows = {}; // request_id -> full row
+
+  // ---- Ticker state ----
+  let lastTickerPrices = {};      // symbol -> last price_per_1k_out
+  let lastBurnRate = {};          // last numeric values for tick anim
+  let tickerEnabled = true;       // disabled if /admin/ticker 401s
+  let lastTapePayload = [];       // most recent tape entries (for click drill-down)
+  let shadowCompareEnabled = true;
+
+  function fmtTs(ts) {
+    if (!ts) return "—";
+    const d = new Date(ts * 1000);
+    return d.toLocaleString();
+  }
+  function fmtMoney(v, dp) {
+    return "$" + Number(v || 0).toFixed(dp || 3);
+  }
+  function fmtPer1k(v) {
+    return v < 0.01 ? "<$0.01" : "$" + Number(v).toFixed(3);
+  }
+
+  const VALID_TIERS = new Set(["cheap", "mid", "frontier", "cache"]);
+  function normalizeTier(t) {
+    const s = String(t || "").toLowerCase();
+    return VALID_TIERS.has(s) ? s : null;
+  }
+  function tierPillHTML(t) {
+    const tier = normalizeTier(t);
+    if (!tier) return '<span class="tier-none">—</span>';
+    return `<span class="tier-pill tier-${tier}">${tier.toUpperCase()}</span>`;
+  }
+  function tierFromModelId(modelId) {
+    const m = String(modelId || "").toLowerCase();
+    if (!m) return null;
+    if (m.includes("opus")) return "frontier";
+    if (m.includes("sonnet") || m.includes("gpt-4") || m.includes("gpt-5") || m.includes("o1") || m.includes("o3")) return "mid";
+    if (m.includes("haiku") || m.includes("mini") || m.includes("flash") || m.includes("nano")) return "cheap";
+    return null;
+  }
+  function tierForTapeEntry(entry) {
+    if (!entry) return null;
+    return normalizeTier(entry.tier) || tierFromModelId(entry.model);
+  }
+  function shortRid(rid) {
+    const s = String(rid || "");
+    if (s.length <= 12) return s;
+    return s.slice(0, 8) + "…" + s.slice(-4);
+  }
+
+  function renderTable(rows) {
+    const container = document.getElementById("table-container");
+    if (!rows || rows.length === 0) {
+      container.innerHTML = emptyHTML();
+      return;
+    }
+    let html = '<table><thead><tr>'
+      + '<th>VOICE</th><th>TIER</th><th>MODEL</th><th>REASON</th>'
+      + '<th class="num">TIME</th><th class="num">IN TOK</th><th class="num">OUT TOK</th>'
+      + '<th class="num">NATIVE $</th><th class="num">PLAN-EQUIV $</th><th class="num">$/1K OUT</th>'
+      + '</tr></thead><tbody id="rows-body">';
+    for (const r of rows) {
+      const reason = (r.route_reason || "") + (r.escalated ? '<span class="esc-flag">ESC</span>' : "");
+      const isShadow = r.consensus_flag === 1 || r.consensus_flag === true;
+      const trClass = isShadow ? ' class="is-shadow"' : "";
+      const shadowBadge = isShadow ? '<span class="shadow-badge">SHADOW</span>' : "";
+      const tierCell = tierPillHTML(r.picked_tier);
+      html += `<tr data-request-id="${escapeAttr(r.request_id)}"${trClass}>`
+        + `<td>${shadowBadge}<span class="dot"></span>${escapeHTML((r.picked_provider || "unknown").toUpperCase())}</td>`
+        + `<td>${tierCell}</td>`
+        + `<td>${escapeHTML(r.picked_model || "")}</td>`
+        + `<td style="color: var(--muted)">${reason}</td>`
+        + `<td class="num">${(r.latency_ms / 1000).toFixed(1)}s</td>`
+        + `<td class="num">${r.tokens_in || 0}</td>`
+        + `<td class="num">${r.tokens_out || 0}</td>`
+        + `<td class="num">${fmtMoney(r.native_cost_usd)}</td>`
+        + `<td class="num">${fmtMoney(r.plan_equiv_cost_usd)}</td>`
+        + `<td class="num">${fmtPer1k(r.output_cost_per_1k || 0)}</td>`
+        + `</tr>`;
+    }
+    html += '</tbody></table>';
+    container.innerHTML = html;
+  }
+
+  function emptyHTML() {
+    const sess = SESSION ? `\n  -H 'x-clearview-session: ${SESSION}' \\` : "";
+    return `<div class="empty">
+      <h3>No calls yet</h3>
+      <div>Send your first request through ClearView. Any OpenAI-compatible client works.</div>
+      <pre><code>curl http://localhost:8000/v1/chat/completions \\
+  -H 'Content-Type: application/json' \\${sess}
+  -d '{
+    "model": "clearview-auto",
+    "messages": [{"role": "user", "content": "rename a python variable"}]
+  }'</code></pre>
+      <div style="margin-top:10px;">Or set <code style="color:var(--accent)">OPENAI_BASE_URL=http://localhost:8000/v1</code> in your tool of choice.</div>
+    </div>`;
+  }
+
+  function escapeHTML(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    })[c]);
+  }
+  function escapeAttr(s) { return escapeHTML(s); }
+
+  function renderKpis(k) {
+    document.getElementById("kpi-native").textContent = fmtMoney(k.native_total);
+    document.getElementById("kpi-native-sub").textContent = `${k.calls} of ${k.calls}`;
+    const synthTotal = Number(k.synth_total || 0);
+    const viaSub = document.getElementById("kpi-via-sub");
+    const synthSub = document.getElementById("kpi-synth-sub");
+    if (synthTotal > 0) {
+      if (viaSub) viaSub.style.display = "";
+      if (synthSub) {
+        synthSub.style.display = "";
+        synthSub.textContent = ` · synth ${fmtMoney(synthTotal)}`;
+      }
+    } else {
+      if (viaSub) viaSub.style.display = "none";
+      if (synthSub) synthSub.style.display = "none";
+    }
+    document.getElementById("kpi-plan").textContent = fmtMoney(k.plan_equiv_total);
+    document.getElementById("kpi-plan-sub").textContent = `${k.calls} of ${k.calls}`;
+    document.getElementById("kpi-tokens-out").textContent = (k.tokens_out / 1000).toFixed(1) + "k";
+    document.getElementById("kpi-tokens-in").textContent = k.tokens_in;
+    document.getElementById("kpi-best").textContent =
+      (k.best_cost_per_1k < 0.01) ? "<$0.01" : "$" + Number(k.best_cost_per_1k).toFixed(2);
+    const badge = document.getElementById("kpi-drift-badge");
+    if (k.drift_pct > 0) {
+      badge.style.display = "";
+      document.getElementById("kpi-drift").textContent = k.drift_pct;
+    } else {
+      badge.style.display = "none";
+    }
+    document.getElementById("status-state").textContent = k.calls ? "DONE" : "WAITING";
+    document.getElementById("progress-bar").style.width = (k.calls ? 100 : 0) + "%";
+    document.getElementById("progress-meta").textContent = `${k.calls} / ${k.calls} complete`;
+    document.getElementById("cost-meta").textContent =
+      `${k.calls} calls · ${(k.tokens_out / 1000).toFixed(1)}k tok · no consensus claimed`;
+  }
+
+  function renderSessions(sessions) {
+    const tabs = document.getElementById("session-tabs");
+    // Clear all but new-session button
+    const newBtn = document.getElementById("new-session-btn");
+    tabs.innerHTML = "";
+    const all = document.createElement("a");
+    all.href = "/admin/explorer";
+    all.textContent = "All";
+    if (!SESSION) all.className = "active";
+    tabs.appendChild(all);
+    for (const s of sessions) {
+      const a = document.createElement("a");
+      a.href = "/admin/explorer?session=" + encodeURIComponent(s.session_id);
+      a.textContent = `${s.session_id} · ${s.n}`;
+      a.dataset.sessionId = s.session_id;
+      if (SESSION === s.session_id) a.className = "active";
+      tabs.appendChild(a);
+    }
+    tabs.appendChild(newBtn);
+  }
+
+  function renderCharts(ts) {
+    spendChart.data.labels = ts.labels;
+    spendChart.data.datasets[0].data = ts.native;
+    spendChart.data.datasets[1].data = ts.plan_equiv;
+    spendChart.update();
+
+    callsChart.data.labels = ts.labels;
+    callsChart.data.datasets[0].data = ts.calls;
+    callsChart.update();
+
+    driftChart.data.labels = ts.labels;
+    driftChart.data.datasets[0].data = ts.drift;
+    driftChart.update();
+  }
+
+  // ---- Ticker rendering ----
+  function fmtPx(v) {
+    const n = Number(v || 0);
+    if (n >= 1)   return "$" + n.toFixed(2);
+    if (n >= 0.01) return "$" + n.toFixed(3);
+    return "<$0.01";
+  }
+  function fmtPerMin(v) {
+    const n = Number(v || 0);
+    if (!isFinite(n)) return "$0.0000/min";
+    return "$" + n.toFixed(4) + "/min";
+  }
+  function arrowFor(direction) {
+    if (direction === "up")   return { ch: "▲", cls: "arr-up" };
+    if (direction === "down") return { ch: "▼", cls: "arr-down" };
+    return { ch: "─", cls: "arr-flat" };
+  }
+
+  function buildTickerCellHTML(entry, pulse) {
+    const arr = arrowFor(entry.direction);
+    const sym = escapeHTML(entry.symbol || "?");
+    const px  = escapeHTML(fmtPx(entry.price_per_1k_out));
+    const dp  = Number(entry.delta_pct || 0);
+    const dpStr = (dp === 0 || entry.direction === "flat") ? "" :
+                  (dp > 0 ? "+" : "") + dp.toFixed(1) + "%";
+    const pulseCls = pulse ? " pulse" : "";
+    const tier = tierForTapeEntry(entry);
+    const dotCls = tier ? ` tier-${tier}` : "";
+    const symCls = tier ? ` sym-${tier}` : "";
+    return `<span class="ticker-cell${pulseCls}" data-symbol="${sym}" data-model="${escapeAttr(entry.model || "")}">`
+      + `<span class="tape-tier-dot${dotCls}"></span>`
+      + `<span class="sym${symCls}">${sym}</span>`
+      + `<span class="px">${px}</span>`
+      + `<span class="${arr.cls}">${arr.ch}${dpStr ? " " + escapeHTML(dpStr) : ""}</span>`
+      + `</span>`;
+  }
+
+  function renderTicker(tape) {
+    const track = document.getElementById("ticker-track");
+    if (!tape || tape.length === 0) {
+      track.innerHTML = '<span class="ticker-empty">no trades in window</span>';
+      lastTickerPrices = {};
+      lastTapePayload = [];
+      return;
+    }
+    lastTapePayload = tape;
+    let cells = "";
+    for (const e of tape) {
+      const prev = lastTickerPrices[e.symbol];
+      const cur  = Number(e.price_per_1k_out || 0);
+      const pulse = (prev !== undefined) && (Math.abs(prev - cur) > 1e-9);
+      cells += buildTickerCellHTML(e, pulse);
+      lastTickerPrices[e.symbol] = cur;
+    }
+    // Duplicate for seamless loop
+    track.innerHTML = cells + cells;
+  }
+
+  function flashIfChanged(elId, key, newText) {
+    const el = document.getElementById(elId);
+    if (!el) return;
+    if (lastBurnRate[key] !== undefined && lastBurnRate[key] !== newText) {
+      el.classList.remove("tick");
+      void el.offsetWidth; // restart animation
+      el.classList.add("tick");
+    }
+    el.textContent = newText;
+    lastBurnRate[key] = newText;
+  }
+
+  function renderBurnRate(br) {
+    if (!br) {
+      ["br-native","br-plan","br-saved","br-synth"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = "$—/min";
+      });
+      document.getElementById("br-synth-row").style.display = "none";
+      return;
+    }
+    flashIfChanged("br-native", "native", fmtPerMin(br.native_per_min_usd));
+    flashIfChanged("br-plan",   "plan",   fmtPerMin(br.plan_equiv_per_min_usd));
+    flashIfChanged("br-saved",  "saved",  fmtPerMin(br.savings_per_min_usd));
+    if (br.synth_per_min !== undefined && br.synth_per_min !== null) {
+      document.getElementById("br-synth-row").style.display = "";
+      flashIfChanged("br-synth", "synth", fmtPerMin(br.synth_per_min));
+    } else {
+      document.getElementById("br-synth-row").style.display = "none";
+    }
+  }
+
+  function symbolForModel(modelId, tape) {
+    if (tape) {
+      for (const e of tape) {
+        if (e.model === modelId) return e.symbol;
+      }
+    }
+    const seg = String(modelId || "").split("/").pop() || modelId || "?";
+    return seg.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6) || "?";
+  }
+
+  function renderCandles(candles, tape) {
+    const container = document.getElementById("depth-container");
+    if (!candles || Object.keys(candles).length === 0) {
+      container.innerHTML = '<div class="depth-empty">no candles yet — waiting for trades</div>';
+      return;
+    }
+    const entries = Object.entries(candles)
+      .map(([m, arr]) => [m, arr || []])
+      .sort((a, b) => b[1].length - a[1].length)
+      .slice(0, 5);
+
+    let html = "";
+    for (const [model, arr] of entries) {
+      const sym = symbolForModel(model, tape);
+      const tapeEntry = (tape || []).find(e => e.model === model);
+      const tier = (tapeEntry && tierForTapeEntry(tapeEntry)) || tierFromModelId(model);
+      const symCls = tier ? ` sym-${tier}` : "";
+      html += `<div class="depth-row">`
+        + `<div class="depth-sym"><span class="${symCls.trim()}">${escapeHTML(sym)}</span><span class="depth-model">${escapeHTML(model)}</span></div>`
+        + `<div>${renderCandleSVG(arr)}</div>`
+        + `</div>`;
+    }
+    container.innerHTML = html;
+  }
+
+  function renderCandleSVG(candles) {
+    if (!candles || candles.length === 0) {
+      return '<div style="color:var(--muted);font-family:var(--mono);font-size:11px;padding:8px;">no data</div>';
+    }
+    const W = 700, H = 100, padL = 38, padR = 8, padT = 8, padB = 16;
+    const innerW = W - padL - padR;
+    const innerH = H - padT - padB;
+    const n = candles.length;
+    const slot = innerW / Math.max(n, 1);
+    const bodyW = Math.max(2, Math.min(10, slot * 0.7));
+
+    let lo = Infinity, hi = -Infinity;
+    for (const c of candles) {
+      if (c.low  < lo) lo = c.low;
+      if (c.high > hi) hi = c.high;
+    }
+    if (!isFinite(lo) || !isFinite(hi) || lo === hi) {
+      const m = isFinite(lo) ? lo : 0;
+      lo = m * 0.95 - 0.001;
+      hi = m * 1.05 + 0.001;
+    }
+    const yFor = v => padT + innerH - ((v - lo) / (hi - lo)) * innerH;
+
+    let body = "";
+    for (let i = 0; i < 3; i++) {
+      const v = lo + (hi - lo) * (i / 2);
+      const y = yFor(v);
+      body += `<line x1="${padL}" x2="${W - padR}" y1="${y}" y2="${y}" stroke="rgba(31,38,45,.6)" stroke-width="1"/>`;
+      body += `<text x="${padL - 4}" y="${y + 3}" fill="#8b95a1" font-family="ui-monospace,Menlo,monospace" font-size="9" text-anchor="end">$${v.toFixed(2)}</text>`;
+    }
+
+    for (let i = 0; i < n; i += 10) {
+      const x = padL + i * slot + slot / 2;
+      const ts = candles[i].ts;
+      const d = new Date(ts * 1000);
+      const lbl = String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0");
+      body += `<text x="${x}" y="${H - 4}" fill="#8b95a1" font-family="ui-monospace,Menlo,monospace" font-size="9" text-anchor="middle">${lbl}</text>`;
+    }
+
+    for (let i = 0; i < n; i++) {
+      const c = candles[i];
+      const cx = padL + i * slot + slot / 2;
+      const isUp = c.close <= c.open; // spec: green when close <= open
+      const color = isUp ? "#41d985" : "#ff6b9d";
+      const yH = yFor(c.high), yL = yFor(c.low);
+      const yO = yFor(c.open), yC = yFor(c.close);
+      const yTop = Math.min(yO, yC);
+      const yBot = Math.max(yO, yC);
+      const h = Math.max(1, yBot - yTop);
+      body += `<line x1="${cx}" x2="${cx}" y1="${yH}" y2="${yL}" stroke="${color}" stroke-width="1"/>`;
+      body += `<rect x="${cx - bodyW/2}" y="${yTop}" width="${bodyW}" height="${h}" fill="${color}" opacity="0.85"/>`;
+    }
+
+    return `<svg class="depth-svg" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${body}</svg>`;
+  }
+
+  function renderLeaderboard(lb, tape) {
+    const burnersEl = document.getElementById("lb-burners");
+    const saversEl  = document.getElementById("lb-savers");
+    const burners = (lb && lb.burners) || [];
+    const savers  = (lb && lb.savers)  || [];
+
+    if (burners.length === 0) {
+      burnersEl.innerHTML = '<li class="lb-empty">no trades in window</li>';
+    } else {
+      burnersEl.innerHTML = burners.map(b => {
+        const sym = escapeHTML(b.symbol || symbolForModel(b.model, tape));
+        const spend = "$" + Number(b.spend_usd || 0).toFixed(3);
+        const calls = Number(b.calls || 0);
+        return `<li><span><span class="lb-sym">${sym}</span><span class="lb-meta">${calls} calls</span></span><span class="lb-val warn">${spend}</span></li>`;
+      }).join("");
+    }
+    if (savers.length === 0) {
+      saversEl.innerHTML = '<li class="lb-empty">no savings yet</li>';
+    } else {
+      saversEl.innerHTML = savers.map(s => {
+        const sym = escapeHTML(s.symbol || symbolForModel(s.model, tape));
+        const saved = "$" + Number(s.saved_vs_baseline_usd || 0).toFixed(3);
+        const calls = Number(s.calls || 0);
+        return `<li><span><span class="lb-sym">${sym}</span><span class="lb-meta">${calls} calls</span></span><span class="lb-val">+${saved}</span></li>`;
+      }).join("");
+    }
+  }
+
+  function renderMarketPill(payload, kpis) {
+    const check = document.getElementById("status-check");
+    const label = document.getElementById("status-label");
+    const state = document.getElementById("status-state");
+    if (!payload || !tickerEnabled) {
+      label.textContent = (SESSION || "ALL").toUpperCase();
+      state.textContent = (kpis && kpis.calls) ? "DONE" : "WAITING";
+      check.classList.remove("closed");
+      return;
+    }
+    if (payload.market_open) {
+      check.classList.remove("closed");
+      label.textContent = "MARKET OPEN";
+      const calls = (kpis && kpis.calls) || 0;
+      state.textContent = `${calls} calls`;
+    } else {
+      check.classList.add("closed");
+      label.textContent = "MARKET CLOSED";
+      const last = payload.last_trade_ts;
+      if (last) {
+        const ageMin = Math.max(0, Math.floor((Date.now() / 1000 - last) / 60));
+        state.textContent = `last trade ${ageMin}m ago`;
+      } else {
+        state.textContent = "no trades";
+      }
+    }
+  }
+
+  function hideTickerSurfaces() {
+    const tape = document.getElementById("ticker-tape");
+    if (tape) tape.style.display = "none";
+    const burn = document.getElementById("burn-rate");
+    if (burn) burn.style.display = "none";
+  }
+
+  function markRefreshed() {
+    const now = new Date();
+    const hh = String(now.getHours()).padStart(2, "0");
+    const mm = String(now.getMinutes()).padStart(2, "0");
+    const ss = String(now.getSeconds()).padStart(2, "0");
+    document.getElementById("last-refresh").textContent = `refreshed ${hh}:${mm}:${ss}`;
+  }
+
+  function shadowCompareURL() {
+    return "/admin/shadow_compare" + qs;
+  }
+
+  async function fetchShadowCompare() {
+    if (!shadowCompareEnabled) return null;
+    try {
+      const res = await fetch(shadowCompareURL());
+      if (res.status === 401 || res.status === 403) {
+        shadowCompareEnabled = false;
+        const panel = document.getElementById("shadow-compare-panel");
+        if (panel) panel.style.display = "none";
+        return null;
+      }
+      if (!res.ok) return null;
+      return await res.json();
+    } catch (e) {
+      console.warn("shadow_compare fetch failed", e);
+      return null;
+    }
+  }
+
+  function fmtSignedMoney(v) {
+    const n = Number(v || 0);
+    const abs = Math.abs(n);
+    const s = abs < 0.001 ? abs.toFixed(6) : abs.toFixed(3);
+    const sign = n > 0 ? "+" : (n < 0 ? "−" : "");
+    return sign + "$" + s;
+  }
+  function fmtSignedMs(v) {
+    const n = Number(v || 0);
+    const sign = n > 0 ? "+" : (n < 0 ? "−" : "");
+    return sign + Math.abs(n) + "ms";
+  }
+  function diffClass(v) {
+    const n = Number(v || 0);
+    if (n > 0) return "sc-diff-pos";
+    if (n < 0) return "sc-diff-neg";
+    return "sc-diff-zero";
+  }
+
+  function renderShadowCompare(payload) {
+    const container = document.getElementById("shadow-compare-container");
+    const meta = document.getElementById("shadow-compare-meta");
+    if (!container) return;
+    const pairs = (payload && payload.pairs) || [];
+    if (pairs.length === 0) {
+      container.innerHTML = '<div class="sc-empty">no shadow comparisons recorded — set x-clearview-shadow: &lt;tier&gt; header</div>';
+      if (meta) meta.textContent = "0 pairs · primary vs shadow";
+      return;
+    }
+    let html = '<table><thead><tr>'
+      + '<th>PRIMARY (model · $)</th>'
+      + '<th>SHADOW (model · $)</th>'
+      + '<th class="num">&Delta; COST</th>'
+      + '<th class="num">&Delta; LATENCY</th>'
+      + '</tr></thead><tbody>';
+    for (const p of pairs) {
+      const pr = p.primary || {};
+      const sh = p.shadow  || {};
+      const pSym = escapeHTML(symbolForModel(pr.picked_model, lastTapePayload));
+      const sSym = escapeHTML(symbolForModel(sh.picked_model, lastTapePayload));
+      const pCost = "$" + Number(pr.native_cost_usd || 0).toFixed(3);
+      const sCost = "$" + Number(sh.native_cost_usd || 0).toFixed(3);
+      const dCost = Number(p.native_diff_usd || 0);
+      const dLat  = Number(p.latency_diff_ms || 0);
+      html += `<tr data-shadow-request-id="${escapeAttr(sh.request_id || "")}">`
+        + `<td><span class="sc-model">${pSym}</span><span class="sc-cost">${pCost}</span></td>`
+        + `<td><span class="sc-model">${sSym}</span><span class="sc-cost">${sCost}</span></td>`
+        + `<td class="num ${diffClass(dCost)}">${escapeHTML(fmtSignedMoney(dCost))}</td>`
+        + `<td class="num ${diffClass(dLat)}">${escapeHTML(fmtSignedMs(dLat))}</td>`
+        + `</tr>`;
+    }
+    html += '</tbody></table>';
+    container.innerHTML = html;
+    if (meta) meta.textContent = `${pairs.length} pair${pairs.length === 1 ? "" : "s"} · primary vs shadow`;
+  }
+
+  function tickerURL() {
+    const params = new URLSearchParams();
+    params.set("window_sec", "300");
+    if (SESSION) params.set("session", SESSION);
+    return "/admin/ticker?" + params.toString();
+  }
+
+  async function fetchTicker() {
+    if (!tickerEnabled) return null;
+    try {
+      const res = await fetch(tickerURL());
+      if (res.status === 401 || res.status === 403) {
+        console.warn("ticker auth failed (" + res.status + "); disabling ticker surfaces");
+        tickerEnabled = false;
+        hideTickerSurfaces();
+        return null;
+      }
+      if (!res.ok) return null;
+      return await res.json();
+    } catch (e) {
+      console.warn("ticker fetch failed", e);
+      return null;
+    }
+  }
+
+  async function pollOnce() {
+    try {
+      const [statsR, tsR, detailR, tickerR, shadowR] = await Promise.all([
+        fetch("/admin/stats" + qs).then(r => r.json()),
+        fetch("/admin/timeseries" + (qs ? qs + "&window=60" : "?window=60")).then(r => r.json()),
+        fetch("/admin/calls_detail" + qs).then(r => r.json()),
+        fetchTicker(),
+        fetchShadowCompare(),
+      ]);
+      renderKpis(statsR.kpis);
+      renderSessions(statsR.sessions);
+      // Build detail map first so click handler has it.
+      detailRows = {};
+      for (const r of detailR.rows) detailRows[r.request_id] = r;
+      renderTable(statsR.rows);
+      renderCharts(tsR);
+      if (tickerR) {
+        renderTicker(tickerR.tape);
+        renderBurnRate(tickerR.burn_rate);
+        renderCandles(tickerR.candles, tickerR.tape);
+        renderLeaderboard(tickerR.leaderboard, tickerR.tape);
+        renderMarketPill(tickerR, statsR.kpis);
+      } else {
+        renderMarketPill(null, statsR.kpis);
+      }
+      if (shadowCompareEnabled) renderShadowCompare(shadowR);
+      markRefreshed();
+    } catch (e) {
+      // Swallow — keep polling.
+      console.warn("poll failed", e);
+    }
+  }
+
+  // ---- Pause toggle ----
+  let timer = null;
+  let paused = false;
+  function start() {
+    if (timer) return;
+    timer = setInterval(pollOnce, POLL_MS);
+    document.getElementById("refresh-dot").classList.remove("paused");
+    document.getElementById("pause-btn").textContent = "PAUSE";
+    document.getElementById("pause-btn").classList.remove("warn");
+  }
+  function stop() {
+    if (timer) clearInterval(timer);
+    timer = null;
+    document.getElementById("refresh-dot").classList.add("paused");
+    document.getElementById("pause-btn").textContent = "RESUME";
+    document.getElementById("pause-btn").classList.add("warn");
+  }
+  document.getElementById("pause-btn").addEventListener("click", () => {
+    paused = !paused;
+    if (paused) stop(); else { start(); pollOnce(); }
+  });
+
+  // ---- New session button ----
+  document.getElementById("new-session-btn").addEventListener("click", () => {
+    const name = prompt("Session name (will be sent as x-clearview-session header on requests):");
+    if (!name) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    window.location.href = "/admin/explorer?session=" + encodeURIComponent(trimmed);
+  });
+
+  // ---- Detail modal ----
+  const dlg = document.getElementById("detail");
+  function openDetail(rid) {
+    const row = detailRows[rid];
+    if (!row) return;
+    const dl = document.getElementById("detail-dl");
+    const tierVal = normalizeTier(row.picked_tier);
+    const tierDD = tierVal
+      ? `<span class="tier-pill tier-${tierVal}">${tierVal.toUpperCase()}</span>`
+      : '<span class="tier-none">—</span>';
+    const isShadow = row.consensus_flag === 1 || row.consensus_flag === true;
+    const roleDD = isShadow ? '<span class="shadow-badge">SHADOW</span>' : "primary";
+    const fields = [
+      ["request_id", escapeHTML(String(row.request_id || ""))],
+      ["session_id", escapeHTML(String(row.session_id || ""))],
+      ["ts", escapeHTML(fmtTs(row.ts))],
+      ["role", roleDD],
+      ["picked_tier", tierDD],
+      ["virtual_model", escapeHTML(String(row.virtual_model || "—"))],
+      ["picked_provider", escapeHTML(String(row.picked_provider || "—"))],
+      ["picked_model", escapeHTML(String(row.picked_model || "—"))],
+      ["route_reason", escapeHTML(String(row.route_reason || "—"))],
+      ["escalated", row.escalated ? "yes" : "no"],
+      ["status", escapeHTML(String(row.status || "ok"))],
+      ["latency_ms", escapeHTML(String(row.latency_ms))],
+      ["tokens_in", escapeHTML(String(row.tokens_in))],
+      ["tokens_out", escapeHTML(String(row.tokens_out))],
+      ["native_cost_usd", "$" + Number(row.native_cost_usd || 0).toFixed(6)],
+      ["plan_equiv_cost_usd", "$" + Number(row.plan_equiv_cost_usd || 0).toFixed(6)],
+      ["output_cost_per_1k", "$" + Number(row.output_cost_per_1k || 0).toFixed(6)],
+      ["prompt_hash", escapeHTML(String(row.prompt_hash || "—"))],
+    ];
+    if (row.shadow_of) {
+      const primaryRid = String(row.shadow_of);
+      const hasPrimary = !!detailRows[primaryRid];
+      const linkAttr = hasPrimary
+        ? `class="primary-link" data-primary-rid="${escapeAttr(primaryRid)}"`
+        : `class="primary-link" data-primary-rid="${escapeAttr(primaryRid)}" style="opacity:.6;cursor:default;"`;
+      fields.push(["shadow_of", `<span ${linkAttr}>primary: ${escapeHTML(shortRid(primaryRid))}</span>`]);
+    }
+    dl.innerHTML = fields.map(([k, v]) =>
+      `<dt>${escapeHTML(k)}</dt><dd>${v}</dd>`
+    ).join("");
+    if (typeof dlg.showModal === "function") dlg.showModal();
+    else dlg.setAttribute("open", "");
+  }
+  function closeDetail() {
+    if (typeof dlg.close === "function") dlg.close();
+    else dlg.removeAttribute("open");
+  }
+  document.getElementById("dlg-close").addEventListener("click", closeDetail);
+  document.getElementById("detail-dl").addEventListener("click", (e) => {
+    const link = e.target.closest(".primary-link");
+    if (!link) return;
+    const rid = link.dataset.primaryRid;
+    if (!rid || !detailRows[rid]) return;
+    openDetail(rid);
+  });
+  // Click outside (on backdrop) closes.
+  dlg.addEventListener("click", (e) => {
+    const rect = dlg.getBoundingClientRect();
+    const inside = e.clientX >= rect.left && e.clientX <= rect.right
+                && e.clientY >= rect.top && e.clientY <= rect.bottom;
+    if (!inside) closeDetail();
+  });
+  // Esc handled natively by <dialog>.
+
+  // Delegate row clicks (table is re-rendered each poll).
+  document.getElementById("table-container").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-request-id]");
+    if (!tr) return;
+    openDetail(tr.dataset.requestId);
+  });
+
+  document.getElementById("shadow-compare-container").addEventListener("click", (e) => {
+    const tr = e.target.closest("tr[data-shadow-request-id]");
+    if (!tr) return;
+    const rid = tr.dataset.shadowRequestId;
+    if (rid && detailRows[rid]) openDetail(rid);
+  });
+
+  // Ticker cell clicks → model detail modal (reuses #detail dialog).
+  function openModelDetail(symbol, model) {
+    const dl = document.getElementById("detail-dl");
+    document.querySelector("#detail .dlg-head h3").textContent = "Model detail · " + symbol;
+    const tapeEntry = lastTapePayload.find(e => e.symbol === symbol) || {};
+    const matched = Object.values(detailRows).filter(r => r.picked_model === model);
+    let totalNative = 0, totalPlan = 0, totIn = 0, totOut = 0;
+    for (const r of matched) {
+      totalNative += Number(r.native_cost_usd || 0);
+      totalPlan   += Number(r.plan_equiv_cost_usd || 0);
+      totIn  += Number(r.tokens_in  || 0);
+      totOut += Number(r.tokens_out || 0);
+    }
+    const fields = [
+      ["symbol", symbol],
+      ["model", model || "—"],
+      ["price_per_1k_out", "$" + Number(tapeEntry.price_per_1k_out || 0).toFixed(4)],
+      ["delta_pct", (tapeEntry.delta_pct === undefined ? "—" : (tapeEntry.delta_pct + "%"))],
+      ["direction", tapeEntry.direction || "—"],
+      ["calls_window", tapeEntry.calls_window !== undefined ? tapeEntry.calls_window : "—"],
+      ["spend_window_usd", "$" + Number(tapeEntry.spend_window_usd || 0).toFixed(4)],
+      ["calls_in_session", matched.length],
+      ["session_native_cost", "$" + totalNative.toFixed(4)],
+      ["session_plan_equiv",  "$" + totalPlan.toFixed(4)],
+      ["session_tokens_in",   totIn],
+      ["session_tokens_out",  totOut],
+    ];
+    dl.innerHTML = fields.map(([k, v]) =>
+      `<dt>${escapeHTML(k)}</dt><dd>${escapeHTML(String(v))}</dd>`
+    ).join("");
+    if (typeof dlg.showModal === "function") dlg.showModal();
+    else dlg.setAttribute("open", "");
+  }
+  // Reset dialog title when reopening row detail.
+  function resetDialogTitleForRow() {
+    document.querySelector("#detail .dlg-head h3").textContent = "Call detail";
+  }
+  // Wrap openDetail so the title resets back when used for rows.
+  const _origOpenDetail = openDetail;
+  openDetail = function(rid) { resetDialogTitleForRow(); _origOpenDetail(rid); };
+
+  document.getElementById("ticker-tape").addEventListener("click", (e) => {
+    const cell = e.target.closest(".ticker-cell");
+    if (!cell) return;
+    openModelDetail(cell.dataset.symbol, cell.dataset.model);
+  });
+
+  // ---- Boot ----
+  pollOnce();    // immediate refresh of charts/detail rows
+  start();
+})();
+</script>
+</body>
+</html>

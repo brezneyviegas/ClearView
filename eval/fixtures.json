@@ -1,0 +1,12 @@
+[
+  {"id": "trivial-1", "expected_tier": "cheap", "prompt": "Rename the variable foo to userName in this snippet:\nlet foo = 'Ada';"},
+  {"id": "trivial-2", "expected_tier": "cheap", "prompt": "Convert 'hello world' to uppercase in Python."},
+  {"id": "trivial-3", "expected_tier": "cheap", "prompt": "What HTTP status code means Not Found?"},
+  {"id": "trivial-4", "expected_tier": "cheap", "prompt": "Format this JSON: {\"a\":1,\"b\":2}"},
+  {"id": "trivial-5", "expected_tier": "cheap", "prompt": "Capital of France?"},
+  {"id": "moderate-1", "expected_tier": "mid", "prompt": "Refactor this function to use early returns and explain the change.\n```js\nfunction f(x){ if(x){ if(x>0){ return x*2 } } return 0 }\n```"},
+  {"id": "moderate-2", "expected_tier": "mid", "prompt": "Debug this stack trace: TypeError: Cannot read properties of undefined (reading 'map') at src/list.tsx:42"},
+  {"id": "moderate-3", "expected_tier": "mid", "prompt": "Write a Python script that reads a CSV, filters rows where status==active, and writes JSON output."},
+  {"id": "hard-1", "expected_tier": "frontier", "prompt": "Architect a multi-tenant rate limiter for a SaaS API serving 10k req/s with per-org quotas, fairness across tenants, and Redis backing. Discuss trade-offs and prove your fairness guarantee."},
+  {"id": "hard-2", "expected_tier": "frontier", "prompt": "Derive the time complexity of a self-balancing AVL tree's insertion and prove the height bound holds inductively."}
+]

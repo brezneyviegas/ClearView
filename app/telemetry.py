@@ -1,0 +1,261 @@
+"""SQLite telemetry. One row per upstream call."""
+from __future__ import annotations
+
+import sqlite3
+import time
+import uuid
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Iterator
+
+from .config import db_path
+
+# In-process cache for today_spend(): (timestamp, value)
+_TODAY_SPEND_CACHE: dict[str, float] = {"ts": 0.0, "value": 0.0}
+_TODAY_SPEND_TTL = 5.0  # seconds
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS calls (
+    request_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    ts REAL NOT NULL,
+    client_id TEXT,
+    virtual_model TEXT,
+    picked_provider TEXT,
+    picked_model TEXT,
+    route_reason TEXT,
+    tokens_in INTEGER NOT NULL DEFAULT 0,
+    tokens_out INTEGER NOT NULL DEFAULT 0,
+    native_cost_usd REAL NOT NULL DEFAULT 0,
+    plan_equiv_cost_usd REAL NOT NULL DEFAULT 0,
+    drift_pct REAL NOT NULL DEFAULT 0,
+    output_cost_per_1k REAL NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    escalated INTEGER NOT NULL DEFAULT 0,
+    consensus_flag INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'ok',
+    prompt_hash TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_calls_session ON calls(session_id);
+CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts);
+"""
+
+# Additive migrations applied on every init_db(). Each statement is wrapped in
+# try/except sqlite3.OperationalError to handle the "column already exists" case
+# without losing data. Append-only — never DROP/RENAME here.
+_MIGRATIONS: list[str] = [
+    "ALTER TABLE calls ADD COLUMN shadow_of TEXT",
+    "ALTER TABLE calls ADD COLUMN synth_cost_usd REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE calls ADD COLUMN picked_tier TEXT",
+]
+
+
+@dataclass
+class CallRecord:
+    session_id: str
+    client_id: str | None = None
+    virtual_model: str | None = None
+    picked_provider: str | None = None
+    picked_model: str | None = None
+    route_reason: str | None = None
+    tokens_in: int = 0
+    tokens_out: int = 0
+    native_cost_usd: float = 0.0
+    plan_equiv_cost_usd: float = 0.0
+    drift_pct: float = 0.0
+    output_cost_per_1k: float = 0.0
+    latency_ms: int = 0
+    escalated: bool = False
+    consensus_flag: bool = False
+    status: str = "ok"
+    prompt_hash: str | None = None
+    shadow_of: str | None = None
+    synth_cost_usd: float = 0.0
+    picked_tier: str | None = None
+    request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    ts: float = field(default_factory=time.time)
+
+
+@contextmanager
+def _conn() -> Iterator[sqlite3.Connection]:
+    c = sqlite3.connect(db_path())
+    c.row_factory = sqlite3.Row
+    try:
+        yield c
+        c.commit()
+    finally:
+        c.close()
+
+
+def init_db() -> None:
+    with _conn() as c:
+        c.executescript(SCHEMA)
+        for stmt in _MIGRATIONS:
+            try:
+                c.execute(stmt)
+            except sqlite3.OperationalError:
+                # Column already exists or compatible no-op. Safe to ignore.
+                pass
+
+
+def record(call: CallRecord) -> None:
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO calls (
+                request_id, session_id, ts, client_id, virtual_model,
+                picked_provider, picked_model, route_reason,
+                tokens_in, tokens_out,
+                native_cost_usd, plan_equiv_cost_usd, drift_pct, output_cost_per_1k,
+                latency_ms, escalated, consensus_flag, status, prompt_hash, shadow_of,
+                synth_cost_usd, picked_tier
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                call.request_id, call.session_id, call.ts, call.client_id, call.virtual_model,
+                call.picked_provider, call.picked_model, call.route_reason,
+                call.tokens_in, call.tokens_out,
+                call.native_cost_usd, call.plan_equiv_cost_usd, call.drift_pct, call.output_cost_per_1k,
+                call.latency_ms, int(call.escalated), int(call.consensus_flag), call.status, call.prompt_hash,
+                call.shadow_of,
+                float(call.synth_cost_usd or 0.0),
+                call.picked_tier,
+            ),
+        )
+
+
+def today_spend() -> float:
+    """Sum of native_cost_usd for rows since UTC midnight. Cached 5s in-process."""
+    now = time.time()
+    if now - _TODAY_SPEND_CACHE["ts"] < _TODAY_SPEND_TTL:
+        return _TODAY_SPEND_CACHE["value"]
+    midnight = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff = midnight.timestamp()
+    with _conn() as c:
+        row = c.execute(
+            "SELECT COALESCE(SUM(native_cost_usd), 0) AS spent FROM calls WHERE ts >= ?",
+            (cutoff,),
+        ).fetchone()
+    val = float(row["spent"] or 0.0)
+    _TODAY_SPEND_CACHE["ts"] = now
+    _TODAY_SPEND_CACHE["value"] = val
+    return val
+
+
+def metrics_snapshot() -> dict:
+    """Aggregate counters for Prometheus exposition. Cheap single query."""
+    with _conn() as c:
+        agg = c.execute(
+            """
+            SELECT
+                COALESCE(SUM(native_cost_usd), 0) AS native_total,
+                COALESCE(SUM(plan_equiv_cost_usd), 0) AS plan_equiv_total,
+                COALESCE(SUM(tokens_out), 0) AS tokens_out
+            FROM calls
+            """
+        ).fetchone()
+        rows = c.execute(
+            """
+            SELECT picked_tier, picked_provider, picked_model, status,
+                   COUNT(*) AS n
+            FROM calls
+            GROUP BY picked_tier, picked_provider, picked_model, status
+            """
+        ).fetchall()
+
+    native = float(agg["native_total"] or 0.0)
+    plan_equiv = float(agg["plan_equiv_total"] or 0.0)
+    drift = ((plan_equiv - native) / plan_equiv * 100.0) if plan_equiv > 0 else 0.0
+
+    # Bucket per (picked_tier, provider, status). picked_tier is now a first-class
+    # column written at route time — no more route_reason substring grepping.
+    buckets: dict[tuple[str, str, str], int] = {}
+    for r in rows:
+        provider = r["picked_provider"] or "unknown"
+        status = r["status"] or "ok"
+        # status simplification: collapse error:* into "error"
+        if status.startswith("error"):
+            status = "error"
+        tier = r["picked_tier"] or "unknown"
+        key = (tier, provider, status)
+        buckets[key] = buckets.get(key, 0) + int(r["n"] or 0)
+
+    return {
+        "native_total": native,
+        "plan_equiv_total": plan_equiv,
+        "tokens_out_total": int(agg["tokens_out"] or 0),
+        "drift_pct": drift,
+        "buckets": buckets,  # dict[(tier, provider, status)] -> count
+    }
+
+
+def stats(session_id: str | None = None) -> dict:
+    """Aggregate KPIs + per-call rows for explorer."""
+    with _conn() as c:
+        where = "WHERE session_id = ?" if session_id else ""
+        params: tuple = (session_id,) if session_id else ()
+
+        agg = c.execute(
+            f"""
+            SELECT
+                COUNT(*) AS calls,
+                COALESCE(SUM(tokens_in), 0) AS tokens_in,
+                COALESCE(SUM(tokens_out), 0) AS tokens_out,
+                COALESCE(SUM(native_cost_usd), 0) AS native_total,
+                COALESCE(SUM(plan_equiv_cost_usd), 0) AS plan_equiv_total,
+                COALESCE(SUM(synth_cost_usd), 0) AS synth_total,
+                COALESCE(MIN(output_cost_per_1k), 0) AS best_cost_per_1k,
+                COALESCE(SUM(CASE WHEN picked_model = 'cache' THEN 1 ELSE 0 END), 0) AS cache_hits,
+                COALESCE(SUM(CASE WHEN picked_model = 'cache' THEN plan_equiv_cost_usd ELSE 0 END), 0) AS cache_savings_usd
+            FROM calls {where}
+            """,
+            params,
+        ).fetchone()
+
+        rows = c.execute(
+            f"""
+            SELECT request_id, picked_provider, picked_model, picked_tier,
+                   latency_ms, tokens_in, tokens_out,
+                   native_cost_usd, plan_equiv_cost_usd, output_cost_per_1k,
+                   route_reason, escalated, consensus_flag, shadow_of, ts
+            FROM calls {where}
+            ORDER BY ts DESC LIMIT 200
+            """,
+            params,
+        ).fetchall()
+
+        sessions = c.execute(
+            "SELECT session_id, COUNT(*) AS n FROM calls GROUP BY session_id ORDER BY MAX(ts) DESC"
+        ).fetchall()
+
+    native = agg["native_total"] or 0.0
+    plan_equiv = agg["plan_equiv_total"] or 0.0
+    synth = float(agg["synth_total"] or 0.0)
+    # Subscription mode: when calls went via the Claude CLI, native is $0 but
+    # the CLI reports a notional API price (synth). Compute drift from synth so
+    # the savings number reflects "what API would have cost − what subscription
+    # notionally cost". Falls back to native-based drift in normal mode.
+    if synth > 0 and native == 0 and plan_equiv > 0:
+        drift = ((plan_equiv - synth) / plan_equiv) * 100.0
+    elif plan_equiv > 0:
+        drift = ((plan_equiv - native) / plan_equiv) * 100.0
+    else:
+        drift = 0.0
+
+    return {
+        "kpis": {
+            "calls": agg["calls"],
+            "tokens_in": agg["tokens_in"],
+            "tokens_out": agg["tokens_out"],
+            "native_total": round(native, 4),
+            "plan_equiv_total": round(plan_equiv, 4),
+            "synth_total": round(synth, 4),
+            "drift_pct": round(drift, 1),
+            "best_cost_per_1k": round(agg["best_cost_per_1k"], 4),
+            "cache_hits": int(agg["cache_hits"] or 0),
+            "cache_savings_usd": round(float(agg["cache_savings_usd"] or 0.0), 4),
+        },
+        "rows": [dict(r) for r in rows],
+        "sessions": [dict(s) for s in sessions],
+    }

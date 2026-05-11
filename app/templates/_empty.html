@@ -1,0 +1,12 @@
+<div class="empty">
+  <h3>No calls yet</h3>
+  <div>Send your first request through ClearView. Any OpenAI-compatible client works.</div>
+  <pre><code>curl http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \{% if current_session %}
+  -H 'x-clearview-session: {{ current_session }}' \{% endif %}
+  -d '{
+    "model": "clearview-auto",
+    "messages": [{"role": "user", "content": "rename a python variable"}]
+  }'</code></pre>
+  <div style="margin-top:10px;">Or set <code>OPENAI_BASE_URL=http://localhost:8000/v1</code> in your tool of choice.</div>
+</div>
