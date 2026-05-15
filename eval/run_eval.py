@@ -220,6 +220,20 @@ def gate(results: dict[str, Any], thresholds: dict[str, Any], *, live: bool) -> 
                        results["classifier_accuracy_pct"], "classifier_accuracy_pct")
         _check_max("max_native_total_usd", results["native_total_usd"], "native_total_usd")
         _check_min("min_drift_pct", results["drift_pct"], "drift_pct")
+
+        # Quality regression thresholds (only when --quality was run AND the
+        # gate file includes the keys). Skipped silently otherwise so existing
+        # gate.json files keep working unchanged.
+        quality = results.get("quality") or {}
+        if quality:
+            if "min_avg_quality_score" in thresholds:
+                _check_min("min_avg_quality_score",
+                           float(quality.get("avg_score", 0.0)),
+                           "avg_quality_score")
+            if "max_quality_drift_pct" in thresholds:
+                _check_max("max_quality_drift_pct",
+                           float(quality.get("quality_drift_pct", 0.0)),
+                           "quality_drift_pct")
     else:
         # In dry mode skip cost thresholds entirely -- dry costs come from
         # approx-token estimates and are not meaningful for regression.
@@ -242,10 +256,39 @@ def main() -> int:
     ap.add_argument("--policy", default=os.environ.get("CLEARVIEW_POLICY_PATH", str(ROOT / "policy.yaml")))
     ap.add_argument("--out", default=None, help="write structured results JSON to this path")
     ap.add_argument("--gate", default=None, help="path to a thresholds JSON; exits non-zero on failure")
+    ap.add_argument("--quality", action="store_true",
+                    help="LLM-as-judge quality eval — also calls baseline + judge models. Requires --live.")
+    ap.add_argument("--quality-fixtures", default=None,
+                    help="comma-separated fixture ids to limit the quality eval to (saves $$)")
+    ap.add_argument("--judge-model", default=None,
+                    help="model id to use as the quality judge; defaults to policy.baseline_model")
     args = ap.parse_args()
 
     results = run(policy_path=args.policy, live=args.live)
     _print_results(results)
+
+    if args.quality:
+        if not args.live:
+            print("\n[quality] --quality requires --live (it calls providers). Skipping.")
+        else:
+            from eval.quality_eval import (
+                run_quality, load_fixtures, filter_fixtures,
+            )
+            pol = load_policy(args.policy)
+            fixtures = load_fixtures(FIXTURES)
+            subset_ids = (
+                [s.strip() for s in args.quality_fixtures.split(",") if s.strip()]
+                if args.quality_fixtures else None
+            )
+            fixtures = filter_fixtures(fixtures, subset_ids)
+            judge = args.judge_model or pol.baseline_model
+            q = run_quality(pol, fixtures, judge_model=judge)
+            results["quality"] = q
+            print(f"\nQuality eval: judge={q['judge_model']} baseline={q['baseline_model']}")
+            print(f"  fixtures={q['fixtures']}  skipped_same_model={q['skipped_same_model']}")
+            print(f"  avg_score={q['avg_score']}  quality_drift_pct={q['quality_drift_pct']}%")
+            print(f"  below_floor (score<{int(__import__('eval.quality_eval', fromlist=['DEFAULT_MIN_AVG_SCORE']).DEFAULT_MIN_AVG_SCORE)})="
+                  f"{q['below_floor_count']}")
 
     if args.out:
         Path(args.out).write_text(json.dumps(results, indent=2) + "\n")

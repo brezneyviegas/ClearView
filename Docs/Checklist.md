@@ -55,12 +55,20 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
   - [x] 4 new tests (TestChatSendStream): delta+metadata emission, persisted
         assistant message, 404 on unknown conv, 401 without login
 
-- [ ] **5. Quality-regression eval** — eval today only measures routing
-  accuracy. Idea success metric: <5% quality regression vs always-frontier.
-  - [ ] Capture frontier-baseline responses for each fixture
-  - [ ] LLM-as-judge pass (Opus grades cheap-tier response vs frontier)
-  - [ ] Add `quality_drift_pct` to gate.json thresholds
-  - [ ] CI fails if quality regresses beyond floor
+- [x] **5. Quality-regression eval** — `eval/quality_eval.py` LLM-as-judge
+  module. `python -m eval.run_eval --live --quality` calls routed + baseline
+  + judge per fixture, grades 1–5, aggregates avg score + quality_drift_pct.
+  - [x] `run_quality(policy, fixtures, judge_model, baseline_model)`
+  - [x] Routed/baseline/judge dispatch via `litellm.completion`
+  - [x] `_grade()` parses digit, defaults to 3 on flaky judge output
+  - [x] Skips fixtures where routed == baseline (no info)
+  - [x] `--quality` + `--quality-fixtures` + `--judge-model` CLI flags
+  - [x] `min_avg_quality_score` + `max_quality_drift_pct` in gate.json
+  - [x] `gate()` honours them only when results contain a `quality` block
+        and `--live` is set (backwards-compatible with old gate runs)
+  - [x] 13 tests (`tests/test_quality_eval.py`): grade parsing, aggregation,
+        same-model skip, perfect-score path, fixture filter, gate pass/fail
+        + backward-compatibility
 
 - [ ] **6. Routing-accuracy Layer 1 — tighten the pipeline** (start AFTER
   items 1–5). Cheapest near-term wins to drive misroute rate down. Do in
