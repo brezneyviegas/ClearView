@@ -26,8 +26,9 @@ def tmp_db(tmp_path, monkeypatch):
     monkeypatch.setenv("CLEARVIEW_DB_PATH", str(db_file))
 
     # Late import so the env var is visible when telemetry resolves db_path().
-    from app import telemetry
+    from app import cache, telemetry
     telemetry.init_db()
+    cache.init_db()
     yield db_file
 
 

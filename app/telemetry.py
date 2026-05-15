@@ -238,7 +238,9 @@ def stats(session_id: str | None = None, team_id: str | None = None) -> dict:
                 COALESCE(SUM(synth_cost_usd), 0) AS synth_total,
                 COALESCE(MIN(output_cost_per_1k), 0) AS best_cost_per_1k,
                 COALESCE(SUM(CASE WHEN picked_model = 'cache' THEN 1 ELSE 0 END), 0) AS cache_hits,
-                COALESCE(SUM(CASE WHEN picked_model = 'cache' THEN plan_equiv_cost_usd ELSE 0 END), 0) AS cache_savings_usd
+                COALESCE(SUM(CASE WHEN picked_model = 'cache' THEN plan_equiv_cost_usd ELSE 0 END), 0) AS cache_savings_usd,
+                COALESCE(SUM(CASE WHEN route_reason LIKE 'semantic_cache_hit%' THEN 1 ELSE 0 END), 0) AS semantic_hits,
+                COALESCE(SUM(CASE WHEN route_reason LIKE 'semantic_cache_hit%' THEN plan_equiv_cost_usd ELSE 0 END), 0) AS semantic_savings_usd
             FROM calls {where}
             """,
             params_t,
@@ -286,6 +288,8 @@ def stats(session_id: str | None = None, team_id: str | None = None) -> dict:
             "best_cost_per_1k": round(agg["best_cost_per_1k"], 4),
             "cache_hits": int(agg["cache_hits"] or 0),
             "cache_savings_usd": round(float(agg["cache_savings_usd"] or 0.0), 4),
+            "semantic_hits": int(agg["semantic_hits"] or 0),
+            "semantic_savings_usd": round(float(agg["semantic_savings_usd"] or 0.0), 4),
         },
         "rows": [dict(r) for r in rows],
         "sessions": [dict(s) for s in sessions],

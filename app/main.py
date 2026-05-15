@@ -356,6 +356,57 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
                         )
                     return JSONResponse(payload)
 
+    # --- Semantic cache lookup ---
+    # Falls back to cosine-search across team-scoped embedded entries when
+    # exact-match missed. Skipped silently if the embedding backend is
+    # disabled or returns no vector. Hits log a separate route_reason so
+    # operators can see semantic vs exact contributions.
+    if cache.semantic_enabled():
+        flat_for_lookup = _flatten_prompt(messages)
+        sem = None
+        try:
+            sem = cache.semantic_lookup(flat_for_lookup, team_id=team_id)
+        except Exception as e:  # noqa: BLE001
+            log.warning("semantic cache lookup failed: %s", e)
+        if sem is not None:
+            cached_row, similarity = sem
+            started_cache = time.perf_counter()
+            try:
+                payload = json.loads(cached_row["response_json"])
+            except Exception:
+                payload = None
+            if payload is not None:
+                tokens_in = int(cached_row.get("tokens_in") or 0)
+                tokens_out = int(cached_row.get("tokens_out") or 0)
+                baseline = baseline_model_env() or pol.baseline_model
+                plan_equiv = cost_for(baseline, tokens_in, tokens_out)
+                latency_ms = int((time.perf_counter() - started_cache) * 1000)
+                telemetry.record(telemetry.CallRecord(
+                    request_id=request_id,
+                    session_id=session_id,
+                    client_id=client_id,
+                    virtual_model=requested,
+                    picked_provider="cache",
+                    picked_model="cache",
+                    picked_tier="cache",
+                    route_reason=f"semantic_cache_hit:sim={similarity:.3f}",
+                    tokens_in=tokens_in,
+                    tokens_out=tokens_out,
+                    native_cost_usd=0.0,
+                    plan_equiv_cost_usd=plan_equiv,
+                    drift_pct=drift_pct(0.0, plan_equiv),
+                    output_cost_per_1k=0.0,
+                    latency_ms=latency_ms,
+                    prompt_hash=_hash_prompt_text(flat_for_lookup),
+                    team_id=team_id,
+                ))
+                if stream:
+                    return StreamingResponse(
+                        cache.synthesize_stream_from_cache(payload),
+                        media_type="text/event-stream",
+                    )
+                return JSONResponse(payload)
+
     # --- Budget enforcement (per-team daily → per-team monthly → global daily) ---
     # First breach wins. Team caps always reject. Global cap still honors
     # policy.budget.on_breach (reject/warn/allow).
@@ -1023,6 +1074,8 @@ def _finalize_non_stream(resp: Any, decision, session_id, client_id, requested,
                 tokens_in=tokens_in,
                 tokens_out=tokens_out,
                 picked_model=used_model,
+                team_id=team_id,
+                prompt_text=prompt_text,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("cache store failed: %s", e)
@@ -1149,6 +1202,8 @@ async def _stream_and_log(resp, decision, session_id, client_id, requested,
                     tokens_in=tokens_in,
                     tokens_out=tokens_out,
                     picked_model=used_model,
+                    team_id=team_id,
+                    prompt_text=prompt_text,
                 )
             except Exception as e:  # noqa: BLE001
                 log.warning("streamed cache write failed: %s", e)

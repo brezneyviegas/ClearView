@@ -19,6 +19,7 @@ import uuid
 from contextlib import contextmanager
 from typing import Any, AsyncIterator, Iterator
 
+from . import embeddings as _emb
 from .config import db_path
 
 SCHEMA = """
@@ -29,12 +30,29 @@ CREATE TABLE IF NOT EXISTS prompt_cache (
     tokens_in INTEGER NOT NULL DEFAULT 0,
     tokens_out INTEGER NOT NULL DEFAULT 0,
     picked_model TEXT,
-    ts REAL NOT NULL
+    ts REAL NOT NULL,
+    team_id TEXT,
+    prompt_text TEXT,
+    embedding BLOB
 );
 CREATE INDEX IF NOT EXISTS idx_prompt_cache_ts ON prompt_cache(ts);
+CREATE INDEX IF NOT EXISTS idx_prompt_cache_team_ts ON prompt_cache(team_id, ts DESC);
 """
 
+# Idempotent column adds for upgrades from earlier schema. Match the
+# pattern used in telemetry.init_db.
+_MIGRATIONS = [
+    "ALTER TABLE prompt_cache ADD COLUMN team_id TEXT",
+    "ALTER TABLE prompt_cache ADD COLUMN prompt_text TEXT",
+    "ALTER TABLE prompt_cache ADD COLUMN embedding BLOB",
+]
+
 _DEFAULT_TTL_SEC = 3600.0
+_DEFAULT_SEMANTIC_THRESHOLD = 0.95
+# Bound the scan window. Scanning every cached row would scale poorly; in
+# practice teams rarely have >2k recent unique prompts. Operator override
+# via CLEARVIEW_SEMANTIC_SCAN_LIMIT.
+_DEFAULT_SEMANTIC_SCAN_LIMIT = 500
 
 
 @contextmanager
@@ -51,6 +69,12 @@ def _conn() -> Iterator[sqlite3.Connection]:
 def init_db() -> None:
     with _conn() as c:
         c.executescript(SCHEMA)
+        for stmt in _MIGRATIONS:
+            try:
+                c.execute(stmt)
+            except sqlite3.OperationalError:
+                # Column already exists. Safe to ignore.
+                pass
 
 
 def enabled() -> bool:
@@ -62,6 +86,38 @@ def ttl_sec() -> float:
         return float(os.environ.get("CLEARVIEW_CACHE_TTL_SEC", str(_DEFAULT_TTL_SEC)))
     except (TypeError, ValueError):
         return _DEFAULT_TTL_SEC
+
+
+def semantic_enabled() -> bool:
+    """Semantic cache is on whenever:
+       1. CLEARVIEW_CACHE_ENABLED is on (the exact-match cache is on), AND
+       2. the embedding backend is not `disabled`, AND
+       3. CLEARVIEW_SEMANTIC_CACHE != "0".
+
+    Operator can keep exact-match on while turning semantic off via
+    CLEARVIEW_SEMANTIC_CACHE=0.
+    """
+    if not enabled():
+        return False
+    if os.environ.get("CLEARVIEW_SEMANTIC_CACHE", "1") == "0":
+        return False
+    return _emb.is_enabled()
+
+
+def semantic_threshold() -> float:
+    try:
+        return float(os.environ.get("CLEARVIEW_SEMANTIC_THRESHOLD",
+                                     str(_DEFAULT_SEMANTIC_THRESHOLD)))
+    except (TypeError, ValueError):
+        return _DEFAULT_SEMANTIC_THRESHOLD
+
+
+def _scan_limit() -> int:
+    try:
+        return max(1, int(os.environ.get("CLEARVIEW_SEMANTIC_SCAN_LIMIT",
+                                          str(_DEFAULT_SEMANTIC_SCAN_LIMIT))))
+    except (TypeError, ValueError):
+        return _DEFAULT_SEMANTIC_SCAN_LIMIT
 
 
 def hash_key(messages: list[dict[str, Any]], virtual_model: str, temperature: float,
@@ -106,18 +162,81 @@ def store(
     tokens_in: int,
     tokens_out: int,
     picked_model: str,
+    *,
+    team_id: str | None = None,
+    prompt_text: str | None = None,
+    embedding: list[float] | None = None,
 ) -> None:
+    """Persist a cache row. `prompt_text` + `embedding` enable later
+    semantic lookups; both are best-effort — pass None when unavailable.
+    """
     if not enabled():
         return
+    # Lazily compute the embedding when the caller has text but no vector.
+    # Skip the call when semantic cache is off so we don't burn embedding $$$
+    # on operators who only want exact-match.
+    if embedding is None and prompt_text and semantic_enabled():
+        embedding = _emb.embed(prompt_text)
+    blob = _emb.to_blob(embedding) if embedding else b""
     with _conn() as c:
         c.execute(
             """
             INSERT OR REPLACE INTO prompt_cache
-                (prompt_hash, virtual_model, response_json, tokens_in, tokens_out, picked_model, ts)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (prompt_hash, virtual_model, response_json, tokens_in, tokens_out,
+                 picked_model, ts, team_id, prompt_text, embedding)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (prompt_hash, virtual_model, response_json, tokens_in, tokens_out, picked_model, time.time()),
+            (prompt_hash, virtual_model, response_json, tokens_in, tokens_out,
+             picked_model, time.time(), team_id, prompt_text, blob),
         )
+
+
+def semantic_lookup(
+    prompt_text: str,
+    team_id: str | None = None,
+    *,
+    threshold: float | None = None,
+) -> tuple[dict, float] | None:
+    """Cosine-search recent embedded cache rows for the same team. Returns
+    (row, similarity) when the best match clears the threshold, else None.
+
+    Same TTL gate as exact-match lookup. Iterates the most-recent rows up
+    to CLEARVIEW_SEMANTIC_SCAN_LIMIT to keep the cosine pass O(N) where N
+    is small.
+    """
+    if not semantic_enabled() or not prompt_text:
+        return None
+
+    query_vec = _emb.embed(prompt_text)
+    if not query_vec:
+        return None
+
+    thresh = threshold if threshold is not None else semantic_threshold()
+    cutoff = time.time() - ttl_sec()
+
+    with _conn() as c:
+        rows = c.execute(
+            """
+            SELECT * FROM prompt_cache
+            WHERE ts >= ?
+              AND (team_id IS ? OR team_id = ?)
+              AND embedding IS NOT NULL AND length(embedding) > 0
+            ORDER BY ts DESC
+            LIMIT ?
+            """,
+            (cutoff, team_id, team_id, _scan_limit()),
+        ).fetchall()
+
+    best: tuple[dict, float] | None = None
+    for r in rows:
+        vec = _emb.from_blob(r["embedding"])
+        sim = _emb.cosine(query_vec, vec)
+        if best is None or sim > best[1]:
+            best = (dict(r), sim)
+
+    if best and best[1] >= thresh:
+        return best
+    return None
 
 
 def write_streamed(
@@ -127,6 +246,10 @@ def write_streamed(
     tokens_in: int,
     tokens_out: int,
     picked_model: str,
+    *,
+    team_id: str | None = None,
+    prompt_text: str | None = None,
+    embedding: list[float] | None = None,
 ) -> None:
     """Cache the concatenated text of a streamed completion as one chat.completion
     response. Same table / TTL as `store`; the stored shape is non-stream so
@@ -157,6 +280,9 @@ def write_streamed(
         tokens_in=int(tokens_in or 0),
         tokens_out=int(tokens_out or 0),
         picked_model=picked_model,
+        team_id=team_id,
+        prompt_text=prompt_text,
+        embedding=embedding,
     )
 
 

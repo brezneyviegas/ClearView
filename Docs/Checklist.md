@@ -28,15 +28,20 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
   - [x] `_finalize_non_stream` recognises `_clearview_via=gemini_cli`
   - [x] Smoke test through `/v1/chat/completions` + `/chat`
 
-- [ ] **3. Embedding / semantic prompt cache** — biggest savings lever still
-  on the table. Idea estimates +30–50% on agent loops.
-  - [ ] Pick embedding source (`text-embedding-3-small` via OpenAI? local
-        sentence-transformers? configurable)
-  - [ ] Schema: vector blob column on `prompt_cache` or sibling table
-  - [ ] Similarity threshold + TTL knobs in policy.yaml
-  - [ ] Per-team scope preserved
-  - [ ] Stats: surface semantic hit rate separately from exact-match
-  - [ ] Cache-bust path when team policy / model changes
+- [x] **3. Embedding / semantic prompt cache** — `app/embeddings.py` +
+  `cache.semantic_lookup()`. Configurable backend (`openai` via litellm or
+  `local` via lazy-loaded sentence-transformers). 0.95 default cosine
+  threshold. Per-team scoped. Surfaced as `semantic_hits` +
+  `semantic_savings_usd` in `/admin/stats`.
+  - [x] Configurable backend (openai|local|disabled)
+  - [x] `embedding BLOB` column on `prompt_cache` (idempotent migration)
+  - [x] Threshold + scan-limit env knobs
+        (`CLEARVIEW_SEMANTIC_THRESHOLD`, `CLEARVIEW_SEMANTIC_SCAN_LIMIT`,
+        `CLEARVIEW_SEMANTIC_CACHE=0` to disable)
+  - [x] Per-team scope preserved (cosine pass filtered by team_id)
+  - [x] Stats: `semantic_hits` + `semantic_savings_usd` separate from exact
+  - [x] Tests: 7 embeddings + 11 semantic-cache (incl. end-to-end paraphrase
+        intercept). Full suite 158 → 183.
 
 - [ ] **4. Streaming in `/chat` UI** — currently send is non-stream one-shot;
   matches Idea's "streaming token cost display" goal.
@@ -51,6 +56,25 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
   - [ ] LLM-as-judge pass (Opus grades cheap-tier response vs frontier)
   - [ ] Add `quality_drift_pct` to gate.json thresholds
   - [ ] CI fails if quality regresses beyond floor
+
+- [ ] **6. Routing-accuracy Layer 1 — tighten the pipeline** (start AFTER
+  items 1–5). Cheapest near-term wins to drive misroute rate down. Do in
+  this order:
+  - [ ] Word-boundary regex on `contains_any` keyword matcher (fixes
+        `refactor` matching `refactoreddata`)
+  - [ ] Classifier confidence floor — ask Haiku for `score, confidence`;
+        escalate one tier when confidence is low
+  - [ ] Structural rules: detect stack traces, math symbols, file paths,
+        URLs, multiline code without fences, imperative vs question shape
+  - [ ] Refusal / short-output detector → escalate when cheap output
+        length ≪ expected
+  - [ ] `would_have_tier` telemetry column + `/admin/routing_quality`
+        page (operator sees disagreement rate between rule-pick and
+        classifier-pick over time)
+
+  Layer 2 (later): LLM-as-judge auto-shadow + per-rule hit-rate table.
+  Layer 3 (much later): embedding-based classifier + thumbs-up/down
+  feedback corpus + online policy tuning.
 
 ---
 
