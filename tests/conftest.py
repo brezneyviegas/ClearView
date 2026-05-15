@@ -153,6 +153,11 @@ def client(monkeypatch, tmp_db):
     """
     repo_root = Path(__file__).resolve().parent.parent
     monkeypatch.setenv("CLEARVIEW_POLICY_PATH", str(repo_root / "policy.yaml"))
+    # Provider calls are monkeypatched in tests. Fake keys keep startup
+    # availability aligned with the configured policy without hitting network.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    monkeypatch.setenv("GEMINI_API_KEY", "test")
 
     from fastapi.testclient import TestClient
     from app.main import app

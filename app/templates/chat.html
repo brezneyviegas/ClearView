@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>ClearView · Chat</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root {
+    --bg: #0d0f12; --panel: #14181d; --line: #1f262d;
+    --text: #e6edf3; --muted: #8b95a1; --accent: #41d985; --warn: #ffb84d; --pink: #ff6b9d;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif; height: 100vh; }
+  a { color: var(--accent); text-decoration: none; }
+  header { padding: 12px 20px; display: flex; align-items: center; gap: 14px;
+           border-bottom: 1px solid var(--line); height: 52px; }
+  header .brand { font-family: var(--mono); font-weight: 600; letter-spacing: -.01em; }
+  header .brand .dot { color: var(--accent); }
+  header .team { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  header .spacer { flex: 1; }
+  .btn { background: var(--panel); border: 1px solid var(--line); color: var(--text);
+         padding: 6px 12px; border-radius: 6px; font-family: var(--mono); font-size: 12px;
+         cursor: pointer; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.accent { color: var(--accent); border-color: rgba(65,217,133,.4); }
+  .btn.warn  { color: var(--warn); border-color: rgba(255,184,77,.4); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Login pane */
+  #login {
+    display: flex; align-items: center; justify-content: center;
+    height: calc(100vh - 52px); padding: 24px;
+  }
+  #login .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 28px 28px 24px; width: 460px; max-width: 100%;
+  }
+  #login h2 { margin: 0 0 6px; font-size: 18px; }
+  #login p { margin: 0 0 18px; color: var(--muted); font-size: 13px; }
+  #login input {
+    width: 100%; padding: 10px 12px; background: #0d0f12; color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; font-family: var(--mono);
+    font-size: 13px; outline: none;
+  }
+  #login input:focus { border-color: var(--accent); }
+  #login .row { display: flex; gap: 10px; margin-top: 12px; }
+  #login .err { color: var(--warn); font-size: 12px; margin-top: 10px; min-height: 16px; }
+
+  /* App layout */
+  #app { display: none; height: calc(100vh - 52px); }
+  #app.shown { display: grid; grid-template-columns: 260px 1fr; }
+  aside {
+    border-right: 1px solid var(--line); background: var(--panel);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  aside .new {
+    padding: 12px; border-bottom: 1px solid var(--line);
+  }
+  aside .convs { flex: 1; overflow-y: auto; padding: 6px; }
+  .conv {
+    padding: 10px 12px; border-radius: 6px; cursor: pointer;
+    color: var(--text); font-size: 13px;
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  }
+  .conv:hover { background: rgba(255,255,255,.03); }
+  .conv.active { background: rgba(65,217,133,.07); border: 1px solid rgba(65,217,133,.3); }
+  .conv .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .conv .del { color: var(--muted); font-family: var(--mono); font-size: 11px; opacity: 0; }
+  .conv:hover .del { opacity: 1; }
+  .conv .del:hover { color: var(--pink); }
+
+  main { display: flex; flex-direction: column; min-height: 0; }
+  #thread {
+    flex: 1; overflow-y: auto; padding: 28px 36px; display: flex; flex-direction: column; gap: 18px;
+  }
+  .msg { max-width: 760px; }
+  .msg .role {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .08em; margin-bottom: 4px;
+  }
+  .msg .body {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; white-space: pre-wrap; word-wrap: break-word;
+  }
+  .msg.user .body { background: #11161b; }
+  .msg.assistant .body { border-color: rgba(65,217,133,.25); }
+  .msg .footer {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    margin-top: 5px; display: flex; gap: 10px; flex-wrap: wrap;
+  }
+  .badge {
+    display: inline-block; padding: 1px 8px; border: 1px solid var(--line);
+    border-radius: 999px; font-size: 10px;
+  }
+  .badge.tier-cheap    { color: var(--accent); border-color: rgba(65,217,133,.4); }
+  .badge.tier-mid      { color: var(--warn);   border-color: rgba(255,184,77,.4); }
+  .badge.tier-frontier { color: var(--pink);   border-color: rgba(255,107,157,.4); }
+
+  /* Composer */
+  #composer {
+    border-top: 1px solid var(--line); padding: 14px 20px;
+    display: grid; grid-template-columns: 1fr auto; gap: 12px;
+    background: #0d0f12;
+  }
+  #composer textarea {
+    width: 100%; min-height: 44px; max-height: 220px; resize: none;
+    padding: 10px 12px; background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: 8px;
+    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif; font-size: 14px;
+    outline: none; line-height: 1.45;
+  }
+  #composer textarea:focus { border-color: var(--accent); }
+  #composer .actions { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+  #composer select {
+    background: var(--panel); border: 1px solid var(--line); color: var(--text);
+    padding: 6px 10px; border-radius: 6px; font-family: var(--mono); font-size: 12px;
+  }
+  .hint { color: var(--muted); font-family: var(--mono); font-size: 11px; padding: 0 22px 8px; }
+  .empty {
+    color: var(--muted); font-family: var(--mono); font-size: 13px;
+    text-align: center; margin-top: 24%;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">▲ ClearView<span class="dot">.</span></div>
+  <div class="team" id="team-label">{% if logged_in %}team: {{ team_name }}{% endif %}</div>
+  <div class="spacer"></div>
+  <a class="btn" href="/admin/explorer">Explorer →</a>
+  <button class="btn warn" id="logout-btn" style="{% if not logged_in %}display:none{% endif %}">Logout</button>
+</header>
+
+<!-- Login pane -->
+<div id="login" {% if logged_in %}style="display:none"{% endif %}>
+  <div class="card">
+    <h2>Sign in to ClearView</h2>
+    <p>Paste your team token. Ask an admin if you don't have one.</p>
+    <input id="token-input" type="text" placeholder="cv_team_..." autocomplete="off" spellcheck="false" />
+    <div class="row">
+      <button class="btn accent" id="login-btn" style="flex:1">Sign in</button>
+    </div>
+    <div class="err" id="login-err"></div>
+  </div>
+</div>
+
+<!-- App pane -->
+<div id="app" class="{% if logged_in %}shown{% endif %}">
+  <aside>
+    <div class="new">
+      <button class="btn accent" id="new-conv-btn" style="width:100%">+ New chat</button>
+    </div>
+    <div class="convs" id="convs"></div>
+  </aside>
+  <main>
+    <div id="thread"><div class="empty">No conversation selected. Start a new chat.</div></div>
+    <div class="hint" id="cost-hint">— no cost yet —</div>
+    <div id="composer">
+      <textarea id="input" placeholder="Type your message... (Enter to send, Shift+Enter for newline)"></textarea>
+      <div class="actions">
+        <select id="tier-select" title="Tier">
+          <option value="auto">auto (router)</option>
+          <option value="cheap">cheap</option>
+          <option value="mid">mid</option>
+          <option value="frontier">frontier</option>
+        </select>
+        <button class="btn accent" id="send-btn">Send</button>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+const $ = (sel) => document.querySelector(sel);
+const state = { convs: [], activeId: null, sending: false, sessionTotal: 0 };
+
+function fmtUsd(v) {
+  if (!v) return "$0";
+  if (v < 0.001) return "$" + v.toFixed(6);
+  if (v < 1)     return "$" + v.toFixed(4);
+  return "$" + v.toFixed(3);
+}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+    ...opts,
+  });
+  if (!r.ok) {
+    let detail = "request failed";
+    try { detail = (await r.json()).detail || detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+// --- Login ----------------------------------------------------------------
+$("#login-btn").addEventListener("click", async () => {
+  const token = $("#token-input").value.trim();
+  if (!token) { $("#login-err").textContent = "Token required"; return; }
+  $("#login-err").textContent = "";
+  try {
+    const out = await api("/chat/login", { method: "POST", body: JSON.stringify({ token }) });
+    $("#team-label").textContent = "team: " + out.team_name;
+    $("#login").style.display = "none";
+    $("#app").classList.add("shown");
+    $("#logout-btn").style.display = "";
+    await refreshConvs();
+  } catch (e) {
+    $("#login-err").textContent = e.message;
+  }
+});
+$("#token-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") $("#login-btn").click();
+});
+
+$("#logout-btn").addEventListener("click", async () => {
+  try { await api("/chat/logout", { method: "POST", body: "{}" }); } catch (_) {}
+  location.reload();
+});
+
+// --- Conversations --------------------------------------------------------
+async function refreshConvs() {
+  const out = await api("/chat/conversations");
+  state.convs = out.conversations || [];
+  renderConvs();
+  if (!state.activeId && state.convs.length) {
+    selectConv(state.convs[0].id);
+  } else if (state.activeId) {
+    renderConvs();
+  }
+}
+
+function renderConvs() {
+  const el = $("#convs");
+  el.innerHTML = "";
+  state.convs.forEach((c) => {
+    const row = document.createElement("div");
+    row.className = "conv" + (c.id === state.activeId ? " active" : "");
+    row.innerHTML = `<span class="title">${escapeHtml(c.title)}</span><span class="del" title="delete">×</span>`;
+    row.querySelector(".title").addEventListener("click", () => selectConv(c.id));
+    row.querySelector(".del").addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      if (!confirm("Delete this conversation?")) return;
+      try {
+        await api(`/chat/conversations/${c.id}`, { method: "DELETE" });
+        if (state.activeId === c.id) state.activeId = null;
+        await refreshConvs();
+        if (!state.activeId) $("#thread").innerHTML = '<div class="empty">No conversation selected.</div>';
+      } catch (e) { alert(e.message); }
+    });
+    el.appendChild(row);
+  });
+}
+
+$("#new-conv-btn").addEventListener("click", async () => {
+  try {
+    const c = await api("/chat/conversations", { method: "POST", body: "{}" });
+    state.activeId = c.id;
+    await refreshConvs();
+    await loadThread(c.id);
+    $("#input").focus();
+  } catch (e) { alert(e.message); }
+});
+
+async function selectConv(id) {
+  state.activeId = id;
+  renderConvs();
+  await loadThread(id);
+}
+
+// --- Thread ---------------------------------------------------------------
+async function loadThread(id) {
+  const out = await api(`/chat/conversations/${id}/messages`);
+  const t = $("#thread");
+  t.innerHTML = "";
+  (out.messages || []).forEach(renderMessage);
+  scrollThread();
+  updateCostHint();
+}
+
+function renderMessage(m) {
+  const wrap = document.createElement("div");
+  wrap.className = "msg " + (m.role || "user");
+  const tier = m.picked_tier || "";
+  const tierBadge = tier ? `<span class="badge tier-${tier}">${tier}</span>` : "";
+  const modelLine = m.picked_model ? `<span>${escapeHtml(m.picked_model)}</span>` : "";
+  const costNative = m.native_cost_usd ? fmtUsd(m.native_cost_usd) + " native" : "";
+  const costSynth  = m.synth_cost_usd  ? fmtUsd(m.synth_cost_usd)  + " synth"  : "";
+  const costPlan   = m.plan_equiv_cost_usd ? fmtUsd(m.plan_equiv_cost_usd) + " plan-equiv" : "";
+  const lat = m.latency_ms ? `${m.latency_ms}ms` : "";
+  const tokens = (m.tokens_in || m.tokens_out)
+    ? `${m.tokens_in||0} in / ${m.tokens_out||0} out` : "";
+  const footer = (m.role === "assistant")
+    ? `<div class="footer">${tierBadge}${modelLine}<span>${costNative}</span><span>${costSynth}</span><span>${costPlan}</span><span>${tokens}</span><span>${lat}</span></div>`
+    : "";
+  wrap.innerHTML = `<div class="role">${m.role}</div><div class="body">${escapeHtml(m.content || "")}</div>${footer}`;
+  $("#thread").appendChild(wrap);
+}
+
+function scrollThread() {
+  const t = $("#thread");
+  t.scrollTop = t.scrollHeight;
+}
+
+function escapeHtml(s) {
+  return (s || "").replace(/[&<>"']/g, (c) => ({
+    "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"
+  })[c]);
+}
+
+// --- Send -----------------------------------------------------------------
+async function send() {
+  if (state.sending) return;
+  if (!state.activeId) {
+    // Auto-create a conversation on first send.
+    const c = await api("/chat/conversations", { method: "POST", body: "{}" });
+    state.activeId = c.id;
+    await refreshConvs();
+  }
+  const content = $("#input").value.trim();
+  if (!content) return;
+  state.sending = true;
+  $("#send-btn").disabled = true;
+  $("#input").value = "";
+
+  // Optimistic render
+  renderMessage({ role: "user", content });
+  const pending = document.createElement("div");
+  pending.className = "msg assistant";
+  pending.innerHTML = '<div class="role">assistant</div><div class="body">…</div>';
+  $("#thread").appendChild(pending);
+  scrollThread();
+
+  const tier = $("#tier-select").value || "auto";
+  try {
+    const out = await api(`/chat/conversations/${state.activeId}/send`, {
+      method: "POST",
+      body: JSON.stringify({ content, tier }),
+    });
+    pending.remove();
+    renderMessage({
+      role: "assistant",
+      content: out.content,
+      picked_tier: out.picked_tier,
+      picked_model: out.picked_model,
+      native_cost_usd: out.native_cost_usd,
+      synth_cost_usd: out.synth_cost_usd,
+      plan_equiv_cost_usd: out.plan_equiv_cost_usd,
+      tokens_in: out.tokens_in,
+      tokens_out: out.tokens_out,
+      latency_ms: out.latency_ms,
+    });
+    state.sessionTotal += (out.native_cost_usd || 0) + (out.synth_cost_usd || 0);
+    updateCostHint(out);
+    scrollThread();
+    // Refresh sidebar so updated_ts ordering reflects this conversation.
+    refreshConvs();
+  } catch (e) {
+    pending.querySelector(".body").textContent = "Error: " + e.message;
+    pending.querySelector(".body").style.color = "var(--pink)";
+  } finally {
+    state.sending = false;
+    $("#send-btn").disabled = false;
+    $("#input").focus();
+  }
+}
+
+function updateCostHint(last) {
+  const sessTotal = fmtUsd(state.sessionTotal);
+  if (last) {
+    const realised = (last.native_cost_usd || 0) + (last.synth_cost_usd || 0);
+    const plan = last.plan_equiv_cost_usd || 0;
+    const saved = Math.max(0, plan - realised);
+    $("#cost-hint").textContent =
+      `last turn: ${fmtUsd(realised)} (vs ${fmtUsd(plan)} baseline · saved ${fmtUsd(saved)}) · session total: ${sessTotal}`;
+  } else {
+    $("#cost-hint").textContent = state.sessionTotal > 0
+      ? `session total: ${sessTotal}`
+      : "— no cost yet —";
+  }
+}
+
+$("#send-btn").addEventListener("click", send);
+$("#input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+// Auto-grow textarea
+$("#input").addEventListener("input", (e) => {
+  e.target.style.height = "auto";
+  e.target.style.height = Math.min(220, e.target.scrollHeight) + "px";
+});
+
+// Boot
+{% if logged_in %}
+refreshConvs().catch((e) => console.error(e));
+{% endif %}
+</script>
+</body>
+</html>

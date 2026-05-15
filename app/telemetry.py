@@ -102,6 +102,17 @@ def init_db() -> None:
                 pass
 
 
+def get_call(request_id: str) -> dict | None:
+    """Return a calls-table row for the given request_id, or None."""
+    if not request_id:
+        return None
+    with _conn() as c:
+        row = c.execute(
+            "SELECT * FROM calls WHERE request_id = ?", (request_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def record(call: CallRecord) -> None:
     with _conn() as c:
         c.execute(

@@ -41,6 +41,11 @@ def _provider_available(model: str) -> bool:
             return True
         return bool(os.environ.get("ANTHROPIC_API_KEY"))
     if model.startswith("openai/"):
+        # Subscription mode: the local Codex CLI fulfills OpenAI calls via the
+        # ChatGPT Plus/Pro plan without an API key. Treat as available when the
+        # operator opted in.
+        if os.environ.get("CLEARVIEW_USE_CODEX_CLI") == "1":
+            return True
         return bool(os.environ.get("OPENAI_API_KEY"))
     if model.startswith("gemini/") or model.startswith("google/"):
         return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
@@ -97,7 +102,15 @@ def _pick_model(tier: str, policy: Policy) -> str:
         tier = "cheap"
     # If availability not yet built (e.g. tests calling _pick_model directly),
     # treat all tier members as available.
-    avail = _AVAILABLE if _AVAILABLE else {t: list(ms) for t, ms in policy.tiers.items()}
+    policy_model_sets = {t: set(ms) for t, ms in policy.tiers.items()}
+    avail_matches_policy = bool(_AVAILABLE) and all(
+        set(_AVAILABLE.get(t, [])).issubset(policy_model_sets.get(t, set()))
+        for t in policy.tiers
+    )
+    if avail_matches_policy:
+        avail = _AVAILABLE
+    else:
+        avail = {t: list(ms) for t, ms in policy.tiers.items()}
 
     try:
         start_idx = _TIER_ORDER.index(tier)

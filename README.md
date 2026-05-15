@@ -35,6 +35,36 @@ export OPENAI_API_KEY=anything   # ClearView ignores; provider keys live in .env
 
 Cursor / Continue / Aider / OpenAI SDK / Vercel AI SDK — all swap with the env var.
 
+## CLI compatibility shims
+
+ClearView also exposes lightweight provider-shape endpoints that translate into the
+same router, budget checks, cache, and telemetry:
+
+```bash
+# Codex / OpenAI Responses-style clients
+export OPENAI_BASE_URL=http://localhost:8000/v1
+export OPENAI_API_KEY=anything
+
+# Claude Messages-style clients
+export ANTHROPIC_BASE_URL=http://localhost:8000
+export ANTHROPIC_API_KEY=anything
+
+# Gemini generateContent-style clients
+export GOOGLE_GEMINI_BASE_URL=http://localhost:8000
+export GEMINI_API_KEY=anything
+```
+
+Implemented compatibility endpoints:
+
+- `POST /v1/responses`
+- `POST /v1/messages`
+- `POST /v1beta/models/{model}:generateContent`
+- `POST /v1/models/{model}:generateContent`
+- streaming variants for Anthropic/Gemini return a one-shot SSE stream
+
+These shims cover normal text prompt/response traffic. Full Claude/Gemini tool-use
+protocol parity is not implemented yet.
+
 ## Virtual models
 
 | model id              | behavior                                     |

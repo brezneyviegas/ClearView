@@ -233,6 +233,73 @@ class TestStreaming:
         assert _count_rows(tmp_db) == 1
 
 
+class TestCompatibilityShims:
+    def test_anthropic_messages_returns_anthropic_shape(self, client, monkeypatch, tmp_db):
+        _patch_completion(
+            monkeypatch,
+            FakeCompletion(content="claude-shaped", prompt_tokens=9, completion_tokens=4),
+        )
+
+        r = client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 64,
+                "messages": [{"role": "user", "content": "hi from claude"}],
+            },
+        )
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["type"] == "message"
+        assert body["role"] == "assistant"
+        assert body["content"] == [{"type": "text", "text": "claude-shaped"}]
+        assert body["usage"] == {"input_tokens": 9, "output_tokens": 4}
+        assert _count_rows(tmp_db) == 1
+
+    def test_openai_responses_returns_responses_shape(self, client, monkeypatch, tmp_db):
+        _patch_completion(
+            monkeypatch,
+            FakeCompletion(content="responses-shaped", prompt_tokens=5, completion_tokens=3),
+        )
+
+        r = client.post(
+            "/v1/responses",
+            json={"model": "gpt-5.4", "input": "hi from codex", "max_output_tokens": 32},
+        )
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["object"] == "response"
+        assert body["status"] == "completed"
+        assert body["output_text"] == "responses-shaped"
+        assert body["usage"]["input_tokens"] == 5
+        assert body["usage"]["output_tokens"] == 3
+        assert _count_rows(tmp_db) == 1
+
+    def test_gemini_generate_content_returns_gemini_shape(self, client, monkeypatch, tmp_db):
+        _patch_completion(
+            monkeypatch,
+            FakeCompletion(content="gemini-shaped", prompt_tokens=6, completion_tokens=2),
+        )
+
+        r = client.post(
+            "/v1beta/models/gemini-1.5-pro:generateContent",
+            json={
+                "contents": [{"role": "user", "parts": [{"text": "hi from gemini"}]}],
+                "generationConfig": {"maxOutputTokens": 32},
+            },
+        )
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["candidates"][0]["content"]["role"] == "model"
+        assert body["candidates"][0]["content"]["parts"] == [{"text": "gemini-shaped"}]
+        assert body["usageMetadata"]["promptTokenCount"] == 6
+        assert body["usageMetadata"]["candidatesTokenCount"] == 2
+        assert _count_rows(tmp_db) == 1
+
+
 # ---------------------------------------------------------------------------
 # 502 / error path
 # ---------------------------------------------------------------------------

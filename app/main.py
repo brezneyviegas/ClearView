@@ -16,10 +16,10 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from . import cache, teams, telemetry
+from . import cache, chat as chat_store, teams, telemetry
 from .config import Policy, baseline_model_env, load_policy
 from .pricing import cost_for, cost_per_1k_out, drift_pct
-from .providers import claude_cli
+from .providers import claude_cli, codex_cli
 from .router import build_availability, route
 
 log = logging.getLogger("clearview.main")
@@ -73,6 +73,7 @@ async def lifespan(app: FastAPI):
     telemetry.init_db()
     teams.init_db()
     cache.init_db()
+    chat_store.init_db()
     avail = build_availability(POLICY)
     for tier, models in avail.items():
         if not models:
@@ -126,6 +127,14 @@ def _call_upstream(forward_kwargs: dict, stream: bool):
         except NotImplementedError:
             # Defensive — shouldn't trigger because we gate on `not stream`.
             pass
+    if (not stream) and codex_cli.is_enabled() and codex_cli.is_available_model(model):
+        try:
+            return codex_cli.completion(
+                model=model,
+                messages=forward_kwargs["messages"],
+            )
+        except NotImplementedError:
+            pass
     return litellm.completion(**forward_kwargs)
 
 
@@ -141,6 +150,14 @@ async def _acall_upstream(forward_kwargs: dict) -> Any:
     if claude_cli.is_enabled() and claude_cli.is_available_model(model):
         try:
             return await claude_cli.acompletion(
+                model=model,
+                messages=forward_kwargs["messages"],
+            )
+        except NotImplementedError:
+            pass
+    if codex_cli.is_enabled() and codex_cli.is_available_model(model):
+        try:
+            return await codex_cli.acompletion(
                 model=model,
                 messages=forward_kwargs["messages"],
             )
@@ -203,19 +220,17 @@ def _resolve_team(request: Request) -> teams.Team | None:
         return cached  # may be None — already resolved this request.
 
     auth = request.headers.get("authorization", "")
-    if not auth:
-        request.state.team = None
-        return None
-    if not auth.lower().startswith("bearer "):
-        # An Authorization header that isn't Bearer is suspicious — but keep
-        # backward compat with anonymous + admin-only paths by ignoring it
-        # unless it looks like a team token.
-        request.state.team = None
-        return None
-    token = auth.split(" ", 1)[1].strip()
-    if not token.startswith("cv_team_"):
-        # Not a team token (could be the admin token used on the admin
-        # endpoints, or a stray header). Treat as anonymous for /v1.
+    token: str | None = None
+    if auth:
+        if auth.lower().startswith("bearer "):
+            cand = auth.split(" ", 1)[1].strip()
+            if cand.startswith("cv_team_"):
+                token = cand
+    if token is None:
+        cookie_val = request.cookies.get("cv_session")
+        if cookie_val and cookie_val.startswith("cv_team_"):
+            token = cookie_val
+    if token is None:
         request.state.team = None
         return None
     t = teams.get(token)
@@ -243,8 +258,12 @@ async def list_models() -> dict:
 
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request) -> Any:
-    pol = _policy()
     body = await request.json()
+    return await _handle_chat_completions(request, body)
+
+
+async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> Any:
+    pol = _policy()
     messages = body.get("messages") or []
     if not messages:
         raise HTTPException(status_code=400, detail="messages required")
@@ -574,6 +593,338 @@ async def chat_completions(request: Request) -> Any:
     return response
 
 
+def _response_payload(resp: Any) -> dict:
+    if isinstance(resp, JSONResponse):
+        try:
+            return json.loads(resp.body.decode("utf-8"))
+        except Exception:
+            return {}
+    if isinstance(resp, dict):
+        return resp
+    return _resp_to_dict(resp)
+
+
+def _chat_text(payload: dict) -> str:
+    try:
+        choices = payload.get("choices") or []
+        msg = (choices[0] or {}).get("message") or {}
+        content = msg.get("content") or ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            return "".join(
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and isinstance(p.get("text"), str)
+            )
+    except Exception:
+        pass
+    return ""
+
+
+def _usage(payload: dict) -> dict:
+    usage = payload.get("usage") or {}
+    if hasattr(usage, "model_dump"):
+        usage = usage.model_dump()
+    return usage if isinstance(usage, dict) else {}
+
+
+def _text_from_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            elif block.get("type") == "tool_result":
+                tool_content = block.get("content", "")
+                parts.append(_text_from_content(tool_content))
+        return "\n".join(p for p in parts if p)
+    return str(content) if content is not None else ""
+
+
+def _anthropic_to_chat(body: dict[str, Any]) -> dict[str, Any]:
+    messages: list[dict[str, Any]] = []
+    system = body.get("system")
+    if system:
+        messages.append({"role": "system", "content": _text_from_content(system)})
+    for msg in body.get("messages") or []:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role", "user")
+        if role == "assistant":
+            out_role = "assistant"
+        else:
+            out_role = "user"
+        messages.append({"role": out_role, "content": _text_from_content(msg.get("content", ""))})
+
+    out: dict[str, Any] = {
+        "model": body.get("model") or "clearview-auto",
+        "messages": messages,
+        "stream": False,
+    }
+    if "max_tokens" in body:
+        out["max_tokens"] = body["max_tokens"]
+    if "temperature" in body:
+        out["temperature"] = body["temperature"]
+    return out
+
+
+def _anthropic_payload(chat_payload: dict, requested_model: str | None = None) -> dict:
+    text = _chat_text(chat_payload)
+    usage = _usage(chat_payload)
+    return {
+        "id": chat_payload.get("id") or f"msg_{uuid.uuid4().hex}",
+        "type": "message",
+        "role": "assistant",
+        "model": requested_model or chat_payload.get("model") or "clearview-auto",
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {
+            "input_tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "output_tokens": int(usage.get("completion_tokens", 0) or 0),
+        },
+    }
+
+
+async def _anthropic_stream(payload: dict):
+    text = _text_from_content(payload.get("content") or [])
+    usage = payload.get("usage") or {}
+    start = {
+        "type": "message_start",
+        "message": {
+            **payload,
+            "content": [],
+            "usage": {
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": 0,
+            },
+        },
+    }
+    yield f"event: message_start\ndata: {json.dumps(start)}\n\n"
+    content_start = {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "text", "text": ""},
+    }
+    yield f"event: content_block_start\ndata: {json.dumps(content_start)}\n\n"
+    delta = {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "text_delta", "text": text},
+    }
+    yield f"event: content_block_delta\ndata: {json.dumps(delta)}\n\n"
+    yield "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"
+    stop = {
+        "type": "message_delta",
+        "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+        "usage": {"output_tokens": usage.get("output_tokens", 0)},
+    }
+    yield f"event: message_delta\ndata: {json.dumps(stop)}\n\n"
+    yield "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+
+
+@app.post("/v1/messages")
+async def anthropic_messages(request: Request) -> Any:
+    """Anthropic Messages compatibility shim.
+
+    This translates basic Claude-style message requests into ClearView's
+    OpenAI-compatible router. Tool-use parity is intentionally not implemented
+    yet; normal text prompt/response calls work and still get telemetry.
+    """
+    body = await request.json()
+    wants_stream = bool(body.get("stream"))
+    chat_body = _anthropic_to_chat(body)
+    resp = await _handle_chat_completions(request, chat_body)
+    if isinstance(resp, JSONResponse) and resp.status_code >= 400:
+        return resp
+    payload = _anthropic_payload(_response_payload(resp), requested_model=body.get("model"))
+    if wants_stream:
+        return StreamingResponse(_anthropic_stream(payload), media_type="text/event-stream")
+    return JSONResponse(payload)
+
+
+def _responses_to_chat(body: dict[str, Any]) -> dict[str, Any]:
+    inp = body.get("input", "")
+    messages: list[dict[str, Any]] = []
+    if isinstance(inp, str):
+        messages.append({"role": "user", "content": inp})
+    elif isinstance(inp, list):
+        for item in inp:
+            if isinstance(item, dict) and item.get("type") == "message":
+                content = item.get("content", "")
+                messages.append({
+                    "role": item.get("role", "user"),
+                    "content": _text_from_content(content),
+                })
+            elif isinstance(item, dict) and isinstance(item.get("content"), str):
+                messages.append({
+                    "role": item.get("role", "user"),
+                    "content": item["content"],
+                })
+    out: dict[str, Any] = {
+        "model": body.get("model") or "clearview-auto",
+        "messages": messages,
+        "stream": False,
+    }
+    if "max_output_tokens" in body:
+        out["max_tokens"] = body["max_output_tokens"]
+    if "temperature" in body:
+        out["temperature"] = body["temperature"]
+    return out
+
+
+def _responses_payload(chat_payload: dict, requested_model: str | None = None) -> dict:
+    text = _chat_text(chat_payload)
+    usage = _usage(chat_payload)
+    response_id = chat_payload.get("id") or f"resp_{uuid.uuid4().hex}"
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": int(time.time()),
+        "status": "completed",
+        "model": requested_model or chat_payload.get("model") or "clearview-auto",
+        "output": [{
+            "id": f"msg_{uuid.uuid4().hex}",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        }],
+        "output_text": text,
+        "usage": {
+            "input_tokens": int(usage.get("prompt_tokens", 0) or 0),
+            "output_tokens": int(usage.get("completion_tokens", 0) or 0),
+            "total_tokens": int(usage.get("total_tokens", 0) or 0),
+        },
+    }
+
+
+async def _responses_stream(payload: dict):
+    text = payload.get("output_text", "")
+    created = {"type": "response.created", "response": {**payload, "output": [], "output_text": ""}}
+    yield f"event: response.created\ndata: {json.dumps(created)}\n\n"
+    delta = {"type": "response.output_text.delta", "delta": text}
+    yield f"event: response.output_text.delta\ndata: {json.dumps(delta)}\n\n"
+    completed = {"type": "response.completed", "response": payload}
+    yield f"event: response.completed\ndata: {json.dumps(completed)}\n\n"
+
+
+@app.post("/v1/responses")
+async def openai_responses(request: Request) -> Any:
+    """Minimal OpenAI Responses compatibility shim for clients that no longer
+    use `/v1/chat/completions`.
+    """
+    body = await request.json()
+    wants_stream = bool(body.get("stream"))
+    resp = await _handle_chat_completions(request, _responses_to_chat(body))
+    if isinstance(resp, JSONResponse) and resp.status_code >= 400:
+        return resp
+    payload = _responses_payload(_response_payload(resp), requested_model=body.get("model"))
+    if wants_stream:
+        return StreamingResponse(_responses_stream(payload), media_type="text/event-stream")
+    return JSONResponse(payload)
+
+
+def _gemini_parts_text(parts: Any) -> str:
+    if not isinstance(parts, list):
+        return ""
+    return "\n".join(
+        str(p.get("text", "")) for p in parts
+        if isinstance(p, dict) and p.get("text") is not None
+    )
+
+
+def _gemini_to_chat(body: dict[str, Any], model_name: str) -> dict[str, Any]:
+    messages: list[dict[str, Any]] = []
+    sys_inst = body.get("systemInstruction") or body.get("system_instruction")
+    if isinstance(sys_inst, dict):
+        sys_text = _gemini_parts_text(sys_inst.get("parts"))
+        if sys_text:
+            messages.append({"role": "system", "content": sys_text})
+
+    for item in body.get("contents") or []:
+        if not isinstance(item, dict):
+            continue
+        role = "assistant" if item.get("role") == "model" else "user"
+        messages.append({"role": role, "content": _gemini_parts_text(item.get("parts"))})
+
+    gen = body.get("generationConfig") or body.get("generation_config") or {}
+    out: dict[str, Any] = {
+        "model": model_name or "clearview-auto",
+        "messages": messages,
+        "stream": False,
+    }
+    if isinstance(gen, dict):
+        if "maxOutputTokens" in gen:
+            out["max_tokens"] = gen["maxOutputTokens"]
+        if "temperature" in gen:
+            out["temperature"] = gen["temperature"]
+    return out
+
+
+def _gemini_payload(chat_payload: dict, requested_model: str | None = None) -> dict:
+    text = _chat_text(chat_payload)
+    usage = _usage(chat_payload)
+    prompt = int(usage.get("prompt_tokens", 0) or 0)
+    output = int(usage.get("completion_tokens", 0) or 0)
+    return {
+        "candidates": [{
+            "content": {
+                "role": "model",
+                "parts": [{"text": text}],
+            },
+            "finishReason": "STOP",
+            "index": 0,
+        }],
+        "usageMetadata": {
+            "promptTokenCount": prompt,
+            "candidatesTokenCount": output,
+            "totalTokenCount": prompt + output,
+        },
+        "modelVersion": requested_model,
+    }
+
+
+async def _gemini_stream(payload: dict):
+    yield f"data: {json.dumps(payload)}\n\n"
+
+
+async def _handle_gemini_generate(request: Request, model_name: str, stream: bool) -> Any:
+    body = await request.json()
+    clean_model = model_name.split(":", 1)[0]
+    resp = await _handle_chat_completions(request, _gemini_to_chat(body, clean_model))
+    if isinstance(resp, JSONResponse) and resp.status_code >= 400:
+        return resp
+    payload = _gemini_payload(_response_payload(resp), requested_model=clean_model)
+    if stream:
+        return StreamingResponse(_gemini_stream(payload), media_type="text/event-stream")
+    return JSONResponse(payload)
+
+
+@app.post("/v1beta/models/{model_name}:generateContent")
+async def gemini_generate_v1beta(model_name: str, request: Request) -> Any:
+    return await _handle_gemini_generate(request, model_name, stream=False)
+
+
+@app.post("/v1/models/{model_name}:generateContent")
+async def gemini_generate_v1(model_name: str, request: Request) -> Any:
+    return await _handle_gemini_generate(request, model_name, stream=False)
+
+
+@app.post("/v1beta/models/{model_name}:streamGenerateContent")
+async def gemini_stream_v1beta(model_name: str, request: Request) -> Any:
+    return await _handle_gemini_generate(request, model_name, stream=True)
+
+
+@app.post("/v1/models/{model_name}:streamGenerateContent")
+async def gemini_stream_v1(model_name: str, request: Request) -> Any:
+    return await _handle_gemini_generate(request, model_name, stream=True)
+
+
 def _build_route_reason(decision, escalated: bool, empty_escalated: bool) -> str:
     reason = decision.reason
     if escalated:
@@ -599,12 +950,16 @@ def _finalize_non_stream(resp: Any, decision, session_id, client_id, requested,
     tokens_out = int((usage or {}).get("completion_tokens", 0) or 0)
 
     payload = _resp_to_dict(resp)
-    via_cli = payload.get("_clearview_via") == "claude_cli"
+    via_marker = payload.get("_clearview_via")
+    via_cli = via_marker in ("claude_cli", "codex_cli")
     if via_cli:
-        # Subscription path → no per-call API charge. Stash the notional API
-        # price the CLI reports as "synth_cost_usd" so we can compute savings.
+        # Subscription path → no per-call API charge. Either the adapter
+        # reported a synth price (claude_cli) or we compute it from the
+        # original model + token counts via the litellm cost table (codex_cli).
         native = 0.0
         synth = float(payload.get("_clearview_synth_cost_usd", 0.0) or 0.0)
+        if synth == 0.0:
+            synth = cost_for(used_model, tokens_in, tokens_out)
     else:
         native = cost_for(used_model, tokens_in, tokens_out)
         synth = 0.0
@@ -659,7 +1014,11 @@ def _finalize_non_stream(resp: Any, decision, session_id, client_id, requested,
         except Exception as e:  # noqa: BLE001
             log.warning("cache store failed: %s", e)
 
-    return JSONResponse(payload), rec.request_id, used_model
+    response = JSONResponse(payload)
+    response.headers["x-clearview-request-id"] = rec.request_id
+    response.headers["x-clearview-tier"] = used_tier or ""
+    response.headers["x-clearview-model"] = used_model or ""
+    return response, rec.request_id, used_model
 
 
 async def _stream_and_log(resp, decision, session_id, client_id, requested,
@@ -836,10 +1195,13 @@ async def _run_shadow(*, shadow_tier: str, primary_request_id: str | None,
     # Mirror the primary path's CLI cost handling: subscription calls report
     # synth cost (notional API price) but $0 native.
     payload = _resp_to_dict(resp)
-    via_cli = payload.get("_clearview_via") == "claude_cli"
+    via_marker = payload.get("_clearview_via")
+    via_cli = via_marker in ("claude_cli", "codex_cli")
     if via_cli:
         native = 0.0
         synth = float(payload.get("_clearview_synth_cost_usd", 0.0) or 0.0)
+        if synth == 0.0:
+            synth = cost_for(shadow_model, tokens_in, tokens_out)
     else:
         native = cost_for(shadow_model, tokens_in, tokens_out)
         synth = 0.0
@@ -1444,3 +1806,161 @@ async def metrics() -> PlainTextResponse:
     lines.append(f"clearview_drift_pct {snap['drift_pct']:.4f}")
 
     return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4")
+
+
+# --------------------------------------------------------------------------- #
+# /chat — non-technical user surface (cookie auth, persisted conversations)   #
+# --------------------------------------------------------------------------- #
+
+_CHAT_TIER_TO_MODEL = {
+    "auto": "clearview-auto",
+    "cheap": "clearview-cheap",
+    "mid": "clearview-mid",
+    "frontier": "clearview-frontier",
+}
+
+
+def _require_chat_team(request: Request) -> teams.Team:
+    t = _resolve_team(request)
+    if t is None:
+        raise HTTPException(status_code=401, detail="not_logged_in")
+    return t
+
+
+@app.get("/chat", response_class=HTMLResponse)
+async def chat_page(request: Request):
+    team = _resolve_team(request)
+    return TEMPLATES.TemplateResponse(
+        request,
+        "chat.html",
+        {"logged_in": team is not None, "team_name": team.name if team else ""},
+    )
+
+
+@app.post("/chat/login")
+async def chat_login(request: Request) -> JSONResponse:
+    body = await request.json()
+    token = (body or {}).get("token", "").strip()
+    if not token.startswith("cv_team_"):
+        raise HTTPException(status_code=400, detail="invalid token format")
+    t = teams.get(token)
+    if t is None or not t.enabled:
+        raise HTTPException(status_code=401, detail="unknown or disabled team")
+    resp = JSONResponse({"ok": True, "team_name": t.name})
+    # 30-day cookie. HttpOnly so JS can't read it. SameSite=Lax for fetch posts.
+    resp.set_cookie(
+        "cv_session", token,
+        max_age=60 * 60 * 24 * 30,
+        httponly=True, samesite="lax", path="/",
+    )
+    return resp
+
+
+@app.post("/chat/logout")
+async def chat_logout() -> JSONResponse:
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("cv_session", path="/")
+    return resp
+
+
+@app.get("/chat/conversations")
+async def chat_list_conversations(request: Request) -> dict:
+    team = _require_chat_team(request)
+    return {"conversations": chat_store.list_conversations(team.id)}
+
+
+@app.post("/chat/conversations")
+async def chat_create_conversation(request: Request) -> dict:
+    team = _require_chat_team(request)
+    body = await request.json() if (await request.body()) else {}
+    title = (body or {}).get("title") or "New chat"
+    conv = chat_store.create_conversation(team.id, title=title)
+    return {"id": conv.id, "title": conv.title, "created_ts": conv.created_ts,
+            "updated_ts": conv.updated_ts}
+
+
+@app.get("/chat/conversations/{cid}/messages")
+async def chat_get_messages(request: Request, cid: str) -> dict:
+    team = _require_chat_team(request)
+    if not chat_store.get_conversation(cid, team.id):
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return {"messages": chat_store.list_messages(cid, team.id)}
+
+
+@app.delete("/chat/conversations/{cid}")
+async def chat_delete_conversation(request: Request, cid: str) -> dict:
+    team = _require_chat_team(request)
+    ok = chat_store.delete_conversation(cid, team.id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="conversation not found")
+    return {"ok": True}
+
+
+@app.post("/chat/conversations/{cid}/send")
+async def chat_send(request: Request, cid: str) -> JSONResponse:
+    team = _require_chat_team(request)
+    if not chat_store.get_conversation(cid, team.id):
+        raise HTTPException(status_code=404, detail="conversation not found")
+
+    body = await request.json()
+    user_text = (body or {}).get("content", "").strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="content required")
+    tier_key = ((body or {}).get("tier") or "auto").lower()
+    model_id = _CHAT_TIER_TO_MODEL.get(tier_key, "clearview-auto")
+
+    # Persist user message first.
+    chat_store.append_message(cid, "user", user_text)
+
+    history = chat_store.messages_for_upstream(cid)
+    # Build OpenAI-shape body. Reuse main chat-completions handler so router,
+    # cache, quotas, telemetry all kick in identically to API path.
+    inner_body = {
+        "model": model_id,
+        "messages": history,
+        "stream": False,
+    }
+    inner_resp = await _handle_chat_completions(request, inner_body)
+
+    # _handle_chat_completions returns a JSONResponse for non-stream.
+    if not isinstance(inner_resp, JSONResponse):
+        raise HTTPException(status_code=500, detail="unexpected response type")
+
+    payload_text = inner_resp.body.decode("utf-8", errors="replace")
+    payload = json.loads(payload_text)
+    assistant_text = ""
+    try:
+        assistant_text = payload["choices"][0]["message"]["content"] or ""
+    except Exception:  # noqa: BLE001
+        assistant_text = ""
+
+    rid = inner_resp.headers.get("x-clearview-request-id", "")
+    rec = telemetry.get_call(rid) if rid else None
+    picked_tier = (rec or {}).get("picked_tier") or inner_resp.headers.get("x-clearview-tier")
+    picked_model = (rec or {}).get("picked_model") or inner_resp.headers.get("x-clearview-model")
+
+    chat_store.append_message(
+        cid, "assistant", assistant_text,
+        request_id=rid or None,
+        picked_tier=picked_tier,
+        picked_model=picked_model,
+        native_cost_usd=float((rec or {}).get("native_cost_usd") or 0.0),
+        synth_cost_usd=float((rec or {}).get("synth_cost_usd") or 0.0),
+        plan_equiv_cost_usd=float((rec or {}).get("plan_equiv_cost_usd") or 0.0),
+        tokens_in=int((rec or {}).get("tokens_in") or 0),
+        tokens_out=int((rec or {}).get("tokens_out") or 0),
+        latency_ms=int((rec or {}).get("latency_ms") or 0),
+    )
+
+    return JSONResponse({
+        "content": assistant_text,
+        "request_id": rid,
+        "picked_tier": picked_tier,
+        "picked_model": picked_model,
+        "native_cost_usd": float((rec or {}).get("native_cost_usd") or 0.0),
+        "synth_cost_usd": float((rec or {}).get("synth_cost_usd") or 0.0),
+        "plan_equiv_cost_usd": float((rec or {}).get("plan_equiv_cost_usd") or 0.0),
+        "tokens_in": int((rec or {}).get("tokens_in") or 0),
+        "tokens_out": int((rec or {}).get("tokens_out") or 0),
+        "latency_ms": int((rec or {}).get("latency_ms") or 0),
+    })
