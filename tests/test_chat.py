@@ -4,11 +4,23 @@ Network-free: every litellm.completion call is monkeypatched to a FakeCompletion
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
 
 from tests.conftest import FakeCompletion
+
+
+class _FakeStreamChunk:
+    """Mimics a litellm streaming chunk (model_dump → openai-shape dict)."""
+    def __init__(self, content: str = "", usage: dict | None = None):
+        self._d = {"choices": [{"delta": {"content": content}, "index": 0}]}
+        if usage is not None:
+            self._d["usage"] = usage
+
+    def model_dump(self):
+        return self._d
 
 
 # ---------------------------------------------------------------------------
@@ -311,3 +323,97 @@ class TestChatSend:
         assert roles == ["user", "assistant", "user"]
         assert captured["messages"][0]["content"] == "one"
         assert captured["messages"][-1]["content"] == "two"
+
+
+# ---------------------------------------------------------------------------
+# Streaming send (SSE)
+# ---------------------------------------------------------------------------
+
+class TestChatSendStream:
+    def _login_and_open(self, client, name="stream-test"):
+        from app import teams
+        teams.init_db()
+        t = teams.create(name=name)
+        client.post("/chat/login", json={"token": t.id})
+        cid = client.post("/chat/conversations", json={"title": "s"}).json()["id"]
+        return t, cid
+
+    def test_send_stream_emits_deltas_and_metadata(self, client, monkeypatch):
+        _, cid = self._login_and_open(client)
+
+        chunks = [
+            _FakeStreamChunk("Hel"),
+            _FakeStreamChunk("lo"),
+            _FakeStreamChunk("", usage={"prompt_tokens": 3, "completion_tokens": 2}),
+        ]
+        _patch_completion(monkeypatch, iter(chunks))
+
+        with client.stream(
+            "POST",
+            f"/chat/conversations/{cid}/send_stream",
+            json={"content": "hi", "tier": "cheap"},
+        ) as r:
+            assert r.status_code == 200
+            assert r.headers["content-type"].startswith("text/event-stream")
+            body = b"".join(r.iter_bytes()).decode()
+
+        # Stream must include at least one delta and the final [DONE].
+        assert "[DONE]" in body
+        # Metadata event present.
+        meta_lines = [
+            line for line in body.splitlines()
+            if line.startswith("data: ") and '"type": "metadata"' in line
+        ]
+        assert meta_lines, body
+        meta = json.loads(meta_lines[-1][len("data: "):])
+        assert meta["picked_tier"] == "cheap"
+        assert meta["tokens_in"] == 3
+        assert meta["tokens_out"] == 2
+
+    def test_send_stream_persists_assistant_message(self, client, monkeypatch):
+        _, cid = self._login_and_open(client, "stream-persist")
+
+        chunks = [
+            _FakeStreamChunk("hello "),
+            _FakeStreamChunk("world"),
+            _FakeStreamChunk("", usage={"prompt_tokens": 4, "completion_tokens": 2}),
+        ]
+        _patch_completion(monkeypatch, iter(chunks))
+
+        with client.stream(
+            "POST",
+            f"/chat/conversations/{cid}/send_stream",
+            json={"content": "greet me", "tier": "cheap"},
+        ) as r:
+            assert r.status_code == 200
+            _ = b"".join(r.iter_bytes())
+
+        msgs = client.get(f"/chat/conversations/{cid}/messages").json()["messages"]
+        assert [m["role"] for m in msgs] == ["user", "assistant"]
+        assert msgs[1]["content"] == "hello world"
+        assert msgs[1]["picked_tier"] == "cheap"
+
+    def test_send_stream_404_on_unknown_conv(self, client, monkeypatch):
+        from app import teams
+        teams.init_db()
+        t = teams.create(name="stream-404")
+        client.post("/chat/login", json={"token": t.id})
+
+        # Patch completion so the inner handler wouldn't fail for a different
+        # reason if it ever got there.
+        _patch_completion(monkeypatch, iter([_FakeStreamChunk("")]))
+
+        with client.stream(
+            "POST",
+            "/chat/conversations/cv_chat_nope/send_stream",
+            json={"content": "hi"},
+        ) as r:
+            assert r.status_code == 404
+
+    def test_send_stream_requires_login(self, client):
+        with client.stream(
+            "POST",
+            "/chat/conversations/cv_chat_xyz/send_stream",
+            json={"content": "hi"},
+        ) as r:
+            assert r.status_code == 401

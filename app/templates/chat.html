@@ -328,46 +328,111 @@ async function send() {
   $("#send-btn").disabled = true;
   $("#input").value = "";
 
-  // Optimistic render
+  // Optimistic render of the user turn.
   renderMessage({ role: "user", content });
   const pending = document.createElement("div");
   pending.className = "msg assistant";
-  pending.innerHTML = '<div class="role">assistant</div><div class="body">…</div>';
+  pending.innerHTML = '<div class="role">assistant</div><div class="body"></div>';
   $("#thread").appendChild(pending);
+  const pendingBody = pending.querySelector(".body");
+  pendingBody.textContent = "…";
   scrollThread();
 
   const tier = $("#tier-select").value || "auto";
   try {
-    const out = await api(`/chat/conversations/${state.activeId}/send`, {
-      method: "POST",
-      body: JSON.stringify({ content, tier }),
-    });
-    pending.remove();
-    renderMessage({
-      role: "assistant",
-      content: out.content,
-      picked_tier: out.picked_tier,
-      picked_model: out.picked_model,
-      native_cost_usd: out.native_cost_usd,
-      synth_cost_usd: out.synth_cost_usd,
-      plan_equiv_cost_usd: out.plan_equiv_cost_usd,
-      tokens_in: out.tokens_in,
-      tokens_out: out.tokens_out,
-      latency_ms: out.latency_ms,
-    });
-    state.sessionTotal += (out.native_cost_usd || 0) + (out.synth_cost_usd || 0);
-    updateCostHint(out);
-    scrollThread();
-    // Refresh sidebar so updated_ts ordering reflects this conversation.
+    await sendStream(content, tier, pending, pendingBody);
     refreshConvs();
   } catch (e) {
-    pending.querySelector(".body").textContent = "Error: " + e.message;
-    pending.querySelector(".body").style.color = "var(--pink)";
+    pendingBody.textContent = "Error: " + e.message;
+    pendingBody.style.color = "var(--pink)";
   } finally {
     state.sending = false;
     $("#send-btn").disabled = false;
     $("#input").focus();
   }
+}
+
+async function sendStream(content, tier, pendingMsgEl, pendingBodyEl) {
+  const r = await fetch(`/chat/conversations/${state.activeId}/send_stream`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, tier }),
+  });
+  if (!r.ok) {
+    let detail = "stream request failed";
+    try { detail = (await r.json()).detail || detail; } catch (_) {}
+    throw new Error(detail);
+  }
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  let assistantText = "";
+  let metadata = null;
+  let firstDelta = true;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // SSE events are separated by blank lines.
+    let nl;
+    while ((nl = buffer.indexOf("\n\n")) >= 0) {
+      const raw = buffer.slice(0, nl);
+      buffer = buffer.slice(nl + 2);
+      for (const line of raw.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        const payload = line.slice(6).trim();
+        if (payload === "[DONE]") continue;
+        let evt;
+        try { evt = JSON.parse(payload); } catch (_) { continue; }
+
+        if (evt && evt.type === "metadata") {
+          metadata = evt;
+          continue;
+        }
+        if (evt && evt.type === "error") {
+          throw new Error(JSON.stringify(evt.payload).slice(0, 200));
+        }
+
+        // Standard chat.completion.chunk shape.
+        const delta = evt && evt.choices && evt.choices[0] && evt.choices[0].delta;
+        const piece = delta && typeof delta.content === "string" ? delta.content : "";
+        if (piece) {
+          if (firstDelta) {
+            pendingBodyEl.textContent = "";
+            firstDelta = false;
+          }
+          assistantText += piece;
+          pendingBodyEl.textContent = assistantText;
+          scrollThread();
+        }
+      }
+    }
+  }
+
+  // Replace the streaming bubble with the final rendered message so it
+  // gets the same footer (tier badge, cost) as historical messages.
+  pendingMsgEl.remove();
+  renderMessage({
+    role: "assistant",
+    content: assistantText,
+    picked_tier: metadata && metadata.picked_tier,
+    picked_model: metadata && metadata.picked_model,
+    native_cost_usd: metadata && metadata.native_cost_usd,
+    synth_cost_usd: metadata && metadata.synth_cost_usd,
+    plan_equiv_cost_usd: metadata && metadata.plan_equiv_cost_usd,
+    tokens_in: metadata && metadata.tokens_in,
+    tokens_out: metadata && metadata.tokens_out,
+    latency_ms: metadata && metadata.latency_ms,
+  });
+  if (metadata) {
+    state.sessionTotal += (metadata.native_cost_usd || 0) + (metadata.synth_cost_usd || 0);
+    updateCostHint(metadata);
+  }
+  scrollThread();
 }
 
 function updateCostHint(last) {

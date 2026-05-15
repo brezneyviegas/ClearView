@@ -43,12 +43,17 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
   - [x] Tests: 7 embeddings + 11 semantic-cache (incl. end-to-end paraphrase
         intercept). Full suite 158 → 183.
 
-- [ ] **4. Streaming in `/chat` UI** — currently send is non-stream one-shot;
-  matches Idea's "streaming token cost display" goal.
-  - [ ] Wire `/chat/conversations/{cid}/send` to optionally stream
-  - [ ] SSE consumer in `chat.html` (vanilla `fetch` reader loop)
-  - [ ] Live token render in assistant bubble
-  - [ ] Running per-turn $ updates as deltas arrive
+- [x] **4. Streaming in `/chat` UI** — new `POST /chat/conversations/{cid}/send_stream`
+  endpoint. Forwards upstream chat.completion.chunk SSE through, then emits a
+  custom `{"type":"metadata", ...}` event with per-turn cost before `[DONE]`.
+  - [x] `send_stream` route that wraps `_handle_chat_completions(..., stream=True)`
+  - [x] SSE consumer in `chat.html` (vanilla `fetch` reader loop)
+  - [x] Live token render in assistant bubble
+  - [x] Metadata event hydrates footer + session cost
+  - [x] `x-clearview-request-id` header surfaced on streaming response so the
+        chat send_stream can hydrate cost numbers from telemetry
+  - [x] 4 new tests (TestChatSendStream): delta+metadata emission, persisted
+        assistant message, 404 on unknown conv, 401 without login
 
 - [ ] **5. Quality-regression eval** — eval today only measures routing
   accuracy. Idea success metric: <5% quality regression vs always-frontier.

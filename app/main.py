@@ -611,11 +611,16 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
                 team_id=team_id,
             ))
         # Budget-warn header: scope name (e.g. "global_daily") if a breach
-        # was tripped in warn mode; absent otherwise.
-        warn_headers = (
-            {"x-clearview-budget-warn": f"{budget_warn_scope}:true"}
-            if budget_warn_scope else None
-        )
+        # was tripped in warn mode; absent otherwise. Always include the
+        # request_id + routed model so /chat/send_stream (and any other
+        # consumer) can correlate telemetry after the stream finishes.
+        stream_headers: dict[str, str] = {
+            "x-clearview-request-id": request_id,
+            "x-clearview-tier": used_tier or "",
+            "x-clearview-model": used_model or "",
+        }
+        if budget_warn_scope:
+            stream_headers["x-clearview-budget-warn"] = f"{budget_warn_scope}:true"
         return StreamingResponse(
             _stream_and_log(resp, decision, session_id, client_id, requested,
                             prompt_text, started, escalated, empty_escalated, used_model,
@@ -625,7 +630,7 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
                             via_cli_stream=use_cli_stream,
                             team_id=team_id),
             media_type="text/event-stream",
-            headers=warn_headers,
+            headers=stream_headers,
         )
 
     response, primary_request_id, primary_model = _finalize_non_stream(
@@ -2032,3 +2037,124 @@ async def chat_send(request: Request, cid: str) -> JSONResponse:
         "tokens_out": int((rec or {}).get("tokens_out") or 0),
         "latency_ms": int((rec or {}).get("latency_ms") or 0),
     })
+
+
+def _chat_metadata_from_telemetry(rid: str, inner_headers: Any) -> dict:
+    """Hydrate per-turn cost data from telemetry by request_id. Falls back
+    to response headers when the row isn't readable yet."""
+    rec = telemetry.get_call(rid) if rid else None
+    return {
+        "type": "metadata",
+        "request_id": rid,
+        "picked_tier": (rec or {}).get("picked_tier") or inner_headers.get("x-clearview-tier"),
+        "picked_model": (rec or {}).get("picked_model") or inner_headers.get("x-clearview-model"),
+        "native_cost_usd": float((rec or {}).get("native_cost_usd") or 0.0),
+        "synth_cost_usd": float((rec or {}).get("synth_cost_usd") or 0.0),
+        "plan_equiv_cost_usd": float((rec or {}).get("plan_equiv_cost_usd") or 0.0),
+        "tokens_in": int((rec or {}).get("tokens_in") or 0),
+        "tokens_out": int((rec or {}).get("tokens_out") or 0),
+        "latency_ms": int((rec or {}).get("latency_ms") or 0),
+    }
+
+
+@app.post("/chat/conversations/{cid}/send_stream")
+async def chat_send_stream(request: Request, cid: str):
+    """SSE-streamed variant of /chat/conversations/{cid}/send.
+
+    Forwards upstream chat.completion.chunk events to the browser as they
+    arrive, then emits a custom `{"type":"metadata", ...}` event with the
+    per-turn cost numbers before the final `[DONE]`. The assistant message
+    is persisted to chat_messages once the stream ends.
+    """
+    team = _require_chat_team(request)
+    if not chat_store.get_conversation(cid, team.id):
+        raise HTTPException(status_code=404, detail="conversation not found")
+
+    body = await request.json()
+    user_text = (body or {}).get("content", "").strip()
+    if not user_text:
+        raise HTTPException(status_code=400, detail="content required")
+    tier_key = ((body or {}).get("tier") or "auto").lower()
+    model_id = _CHAT_TIER_TO_MODEL.get(tier_key, "clearview-auto")
+
+    chat_store.append_message(cid, "user", user_text)
+
+    history = chat_store.messages_for_upstream(cid)
+    inner_body = {"model": model_id, "messages": history, "stream": True}
+    inner_resp = await _handle_chat_completions(request, inner_body)
+
+    # If exact-match or semantic cache intercepted, the handler returns a
+    # StreamingResponse synthesized from the cache (one big chunk + [DONE]).
+    # We tap that same stream so the chat send_stream contract stays uniform.
+    if not isinstance(inner_resp, StreamingResponse):
+        # Defensive: dispatch returned a JSONResponse (e.g. budget reject).
+        # Re-emit as a single metadata event so the client doesn't hang.
+        async def _gen_err():
+            try:
+                payload = json.loads(inner_resp.body.decode("utf-8", "replace"))
+            except Exception:
+                payload = {"error": "non-stream response from upstream"}
+            yield (f"data: {json.dumps({'type': 'error', 'payload': payload})}\n\n").encode("utf-8")
+            yield b"data: [DONE]\n\n"
+        return StreamingResponse(_gen_err(), media_type="text/event-stream",
+                                 status_code=inner_resp.status_code or 200)
+
+    rid = inner_resp.headers.get("x-clearview-request-id", "")
+
+    async def gen():
+        text_buf: list[str] = []
+        try:
+            async for chunk_b in inner_resp.body_iterator:
+                if isinstance(chunk_b, str):
+                    chunk_bytes = chunk_b.encode("utf-8")
+                    chunk_str = chunk_b
+                else:
+                    chunk_bytes = chunk_b
+                    chunk_str = chunk_b.decode("utf-8", errors="replace")
+
+                # Accumulate assistant text by parsing each SSE `data: ...`
+                # JSON line. Best-effort — non-JSON chunks pass through.
+                for line in chunk_str.splitlines():
+                    if not line.startswith("data: "):
+                        continue
+                    payload_text = line[6:].strip()
+                    if payload_text == "[DONE]":
+                        continue
+                    try:
+                        evt = json.loads(payload_text)
+                    except Exception:
+                        continue
+                    choices = evt.get("choices") or []
+                    if choices:
+                        delta = (choices[0] or {}).get("delta") or {}
+                        piece = delta.get("content")
+                        if isinstance(piece, str) and piece:
+                            text_buf.append(piece)
+
+                yield chunk_bytes
+        except Exception as e:  # noqa: BLE001
+            log.warning("chat send_stream inner iterator failed: %s", e)
+
+        full_text = "".join(text_buf)
+        meta = _chat_metadata_from_telemetry(rid, inner_resp.headers)
+
+        try:
+            chat_store.append_message(
+                cid, "assistant", full_text,
+                request_id=rid or None,
+                picked_tier=meta.get("picked_tier"),
+                picked_model=meta.get("picked_model"),
+                native_cost_usd=meta.get("native_cost_usd", 0.0),
+                synth_cost_usd=meta.get("synth_cost_usd", 0.0),
+                plan_equiv_cost_usd=meta.get("plan_equiv_cost_usd", 0.0),
+                tokens_in=meta.get("tokens_in", 0),
+                tokens_out=meta.get("tokens_out", 0),
+                latency_ms=meta.get("latency_ms", 0),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("chat send_stream persist failed: %s", e)
+
+        yield f"data: {json.dumps(meta)}\n\n".encode("utf-8")
+        yield b"data: [DONE]\n\n"
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
