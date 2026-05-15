@@ -21,12 +21,12 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
   - [x] `codex_cli.acompletion` with mocked asyncio.create_subprocess_exec
   - [x] Gating + model-prefix availability checks
 
-- [ ] **2. Gemini CLI subscription bypass** — parity with Claude + Codex.
-  - [ ] `app/providers/gemini_cli.py` (`gemini -p "<prompt>" -o json -m <model>`)
-  - [ ] Wire into `_call_upstream` / `_acall_upstream`
-  - [ ] Router: `gemini/*` returns available when `CLEARVIEW_USE_GEMINI_CLI=1`
-  - [ ] `_finalize_non_stream` recognises `_clearview_via=gemini_cli`
-  - [ ] Smoke test through `/v1/chat/completions` + `/chat`
+- [x] **2. Gemini CLI subscription bypass** — parity with Claude + Codex.
+  - [x] `app/providers/gemini_cli.py` (`gemini -p "<prompt>" -o json -m <model>`)
+  - [x] Wire into `_call_upstream` / `_acall_upstream`
+  - [x] Router: `gemini/*` returns available when `CLEARVIEW_USE_GEMINI_CLI=1`
+  - [x] `_finalize_non_stream` recognises `_clearview_via=gemini_cli`
+  - [x] Smoke test through `/v1/chat/completions` + `/chat`
 
 - [ ] **3. Embedding / semantic prompt cache** — biggest savings lever still
   on the table. Idea estimates +30–50% on agent loops.

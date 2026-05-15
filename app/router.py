@@ -48,6 +48,8 @@ def _provider_available(model: str) -> bool:
             return True
         return bool(os.environ.get("OPENAI_API_KEY"))
     if model.startswith("gemini/") or model.startswith("google/"):
+        if os.environ.get("CLEARVIEW_USE_GEMINI_CLI") == "1":
+            return True
         return bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
     # Unknown provider prefix: assume available (litellm will surface the error).
     return True

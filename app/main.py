@@ -19,7 +19,7 @@ from fastapi.templating import Jinja2Templates
 from . import cache, chat as chat_store, teams, telemetry
 from .config import Policy, baseline_model_env, load_policy
 from .pricing import cost_for, cost_per_1k_out, drift_pct
-from .providers import claude_cli, codex_cli
+from .providers import claude_cli, codex_cli, gemini_cli
 from .router import build_availability, route
 
 log = logging.getLogger("clearview.main")
@@ -135,6 +135,14 @@ def _call_upstream(forward_kwargs: dict, stream: bool):
             )
         except NotImplementedError:
             pass
+    if (not stream) and gemini_cli.is_enabled() and gemini_cli.is_available_model(model):
+        try:
+            return gemini_cli.completion(
+                model=model,
+                messages=forward_kwargs["messages"],
+            )
+        except NotImplementedError:
+            pass
     return litellm.completion(**forward_kwargs)
 
 
@@ -163,10 +171,15 @@ async def _acall_upstream(forward_kwargs: dict) -> Any:
             )
         except NotImplementedError:
             pass
-    acompletion = getattr(litellm, "acompletion", None)
-    if acompletion is not None:
-        return await acompletion(**forward_kwargs)
-    return await asyncio.to_thread(litellm.completion, **forward_kwargs)
+    if gemini_cli.is_enabled() and gemini_cli.is_available_model(model):
+        try:
+            return await gemini_cli.acompletion(
+                model=model,
+                messages=forward_kwargs["messages"],
+            )
+        except NotImplementedError:
+            pass
+    return await litellm.acompletion(**forward_kwargs)
 
 
 def _resp_to_dict(resp: Any) -> dict:
@@ -951,7 +964,7 @@ def _finalize_non_stream(resp: Any, decision, session_id, client_id, requested,
 
     payload = _resp_to_dict(resp)
     via_marker = payload.get("_clearview_via")
-    via_cli = via_marker in ("claude_cli", "codex_cli")
+    via_cli = via_marker in ("claude_cli", "codex_cli", "gemini_cli")
     if via_cli:
         # Subscription path → no per-call API charge. Either the adapter
         # reported a synth price (claude_cli) or we compute it from the
@@ -1196,7 +1209,7 @@ async def _run_shadow(*, shadow_tier: str, primary_request_id: str | None,
     # synth cost (notional API price) but $0 native.
     payload = _resp_to_dict(resp)
     via_marker = payload.get("_clearview_via")
-    via_cli = via_marker in ("claude_cli", "codex_cli")
+    via_cli = via_marker in ("claude_cli", "codex_cli", "gemini_cli")
     if via_cli:
         native = 0.0
         synth = float(payload.get("_clearview_synth_cost_usd", 0.0) or 0.0)
