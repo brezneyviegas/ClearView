@@ -427,9 +427,10 @@
     <div class="br-row" id="br-synth-row" style="display:none;"><span class="br-val synth" id="br-synth">$—/min</span><span class="br-lbl">SYNTH (sub)</span></div>
   </div>
   <div class="header-actions">
-    <span class="meta"><span class="refresh-dot" id="refresh-dot"></span><span id="last-refresh">just now</span></span>
-    <button class="btn" id="pause-btn">PAUSE</button>
-  </div>
+	    <span class="meta"><span class="refresh-dot" id="refresh-dot"></span><span id="last-refresh">just now</span></span>
+	    <button class="btn" id="bell-btn" title="Toggle price-change bell">BELL OFF</button>
+	    <button class="btn" id="pause-btn">PAUSE</button>
+	  </div>
 </header>
 
 <div class="ticker-tape" id="ticker-tape" aria-label="Cost ticker tape">
@@ -683,9 +684,11 @@
   let lastBurnRate = {};          // last numeric values for tick anim
   let tickerEnabled = true;       // disabled if /admin/ticker 401s
   let lastTapePayload = [];       // most recent tape entries (for click drill-down)
-  let lastTickerPayload = null;   // full last /admin/ticker payload (for drill-down candles)
-  let lastDetailRows = [];        // ordered last calls_detail rows (for trade tape, last 20 per model)
-  let shadowCompareEnabled = true;
+	  let lastTickerPayload = null;   // full last /admin/ticker payload (for drill-down candles)
+	  let lastDetailRows = [];        // ordered last calls_detail rows (for trade tape, last 20 per model)
+	  let shadowCompareEnabled = true;
+	  let bellEnabled = false;
+	  let audioCtx = null;
   // Drill-down panel state. selectedSymbol == null when closed.
   let selectedSymbol = null;      // { picked_model, symbol } | null
 
@@ -894,7 +897,7 @@
       + `</span>`;
   }
 
-  function renderTicker(tape) {
+	  function renderTicker(tape) {
     const track = document.getElementById("ticker-track");
     if (!tape || tape.length === 0) {
       track.innerHTML = '<span class="ticker-empty">no trades in window</span>';
@@ -904,13 +907,31 @@
     }
     lastTapePayload = tape;
     let cells = "";
-    for (const e of tape) {
-      const prev = lastTickerPrices[e.symbol];
-      const cur  = Number(e.price_per_1k_out || 0);
-      const pulse = (prev !== undefined) && (Math.abs(prev - cur) > 1e-9);
-      cells += buildTickerCellHTML(e, pulse);
+	    for (const e of tape) {
+	      const prev = lastTickerPrices[e.symbol];
+	      const cur  = Number(e.price_per_1k_out || 0);
+	      const pulse = (prev !== undefined) && (Math.abs(prev - cur) > 1e-9);
+	      if (pulse) playBell(cur > prev ? 880 : 440);
+	      cells += buildTickerCellHTML(e, pulse);
       lastTickerPrices[e.symbol] = cur;
-    }
+	  }
+
+	  function playBell(freq) {
+	    if (!bellEnabled) return;
+	    try {
+	      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+	      const osc = audioCtx.createOscillator();
+	      const gain = audioCtx.createGain();
+	      osc.frequency.value = freq;
+	      osc.type = "sine";
+	      gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+	      gain.gain.exponentialRampToValueAtTime(0.08, audioCtx.currentTime + 0.01);
+	      gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.14);
+	      osc.connect(gain).connect(audioCtx.destination);
+	      osc.start();
+	      osc.stop(audioCtx.currentTime + 0.16);
+	    } catch (_) {}
+	  }
     // Duplicate for seamless loop
     track.innerHTML = cells + cells;
   }
@@ -1422,10 +1443,21 @@
     if (!li || !li.dataset.model) return;
     openTickerDetail(li.dataset.model, li.dataset.symbol);
   }
-  document.getElementById("lb-burners").addEventListener("click", leaderboardClick);
-  document.getElementById("lb-savers").addEventListener("click", leaderboardClick);
+	  document.getElementById("lb-burners").addEventListener("click", leaderboardClick);
+	  document.getElementById("lb-savers").addEventListener("click", leaderboardClick);
+	  document.getElementById("bell-btn").addEventListener("click", async () => {
+	    bellEnabled = !bellEnabled;
+	    const btn = document.getElementById("bell-btn");
+	    btn.textContent = bellEnabled ? "BELL ON" : "BELL OFF";
+	    if (bellEnabled) {
+	      try {
+	        audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+	        await audioCtx.resume();
+	      } catch (_) {}
+	    }
+	  });
 
-  // ---- Ticker drill-down panel ----
+	  // ---- Ticker drill-down panel ----
   const tdPanel = document.getElementById("td-panel");
   const tdScrim = document.getElementById("td-scrim");
 

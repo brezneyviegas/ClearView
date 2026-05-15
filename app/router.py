@@ -12,6 +12,29 @@ import litellm
 from .config import Policy
 
 CODE_FENCE_RE = re.compile(r"```")
+STACK_TRACE_RE = re.compile(
+    r"(traceback \(most recent call last\)|\bexception\b|\berror:\s|"
+    r"\bat\s+[\w.$<>]+\([^)]*:\d+\)|file \"[^\"]+\", line \d+)",
+    re.IGNORECASE,
+)
+MATH_SYMBOL_RE = re.compile(
+    r"(∑|∫|√|≤|≥|≠|≈|∞|\\frac|\\sum|\\int|[A-Za-z0-9)]\s*\^\s*[A-Za-z0-9(])",
+    re.IGNORECASE,
+)
+FILE_PATH_RE = re.compile(
+    r"((?:\.{1,2}/|/)[\w./-]+|[A-Za-z]:\\[\w.\\-]+|[\w.-]+/[\w./-]+|"
+    r"\b[\w.-]+\.(?:py|ts|tsx|js|jsx|go|rs|java|rb|php|cs|cpp|c|h|sql|ya?ml|json|toml)\b)"
+)
+URL_RE = re.compile(r"https?://\S+|www\.\S+", re.IGNORECASE)
+CODEISH_RE = re.compile(
+    r"(^\s{2,}\S+|[{};]$|\b(def|class|function|const|let|var|if|for|while|return)\b)",
+    re.IGNORECASE,
+)
+IMPERATIVE_RE = re.compile(
+    r"^\s*(please\s+)?(fix|debug|implement|write|create|build|refactor|design|"
+    r"review|optimize|derive|prove|explain|summarize|compare|analyze)\b",
+    re.IGNORECASE,
+)
 
 log = logging.getLogger("clearview.router")
 
@@ -28,6 +51,12 @@ class RouteDecision:
     tier: str
     model: str
     reason: str  # human-readable: "rule:tiny_prompt" / "classifier:score=4"
+
+
+@dataclass
+class ClassifierDecision:
+    score: int
+    confidence: float
 
 
 def _provider_available(model: str) -> bool:
@@ -78,9 +107,25 @@ def _has_code(text: str) -> bool:
     return bool(CODE_FENCE_RE.search(text))
 
 
+def _has_multiline_code_without_fence(text: str) -> bool:
+    if _has_code(text):
+        return False
+    codeish = 0
+    for line in text.splitlines():
+        if CODEISH_RE.search(line):
+            codeish += 1
+    return codeish >= 2
+
+
 def _contains_any(text: str, needles: list[str]) -> bool:
-    low = text.lower()
-    return any(n.lower() in low for n in needles)
+    for needle in needles:
+        normalized = " ".join(str(needle).strip().split())
+        if not normalized:
+            continue
+        pattern = r"(?<!\w)" + re.escape(normalized).replace(r"\ ", r"\s+") + r"(?!\w)"
+        if re.search(pattern, text, flags=re.IGNORECASE):
+            return True
+    return False
 
 
 def _eval_rule(cond: dict[str, Any], prompt: str, header_tier: str | None) -> bool:
@@ -94,6 +139,20 @@ def _eval_rule(cond: dict[str, Any], prompt: str, header_tier: str | None) -> bo
     if cond.get("no_code") and _has_code(prompt):
         return False
     if "contains_any" in cond and not _contains_any(prompt, cond["contains_any"]):
+        return False
+    if cond.get("stack_trace") and not STACK_TRACE_RE.search(prompt):
+        return False
+    if cond.get("math_symbols") and not MATH_SYMBOL_RE.search(prompt):
+        return False
+    if cond.get("file_path") and not FILE_PATH_RE.search(prompt):
+        return False
+    if cond.get("url") and not URL_RE.search(prompt):
+        return False
+    if cond.get("multiline_code_no_fence") and not _has_multiline_code_without_fence(prompt):
+        return False
+    if cond.get("imperative") and not IMPERATIVE_RE.search(prompt):
+        return False
+    if cond.get("question") and "?" not in prompt:
         return False
     return True
 
@@ -138,21 +197,64 @@ def _pick_model(tier: str, policy: Policy) -> str:
     return fallback[0]
 
 
-def _classify(prompt: str, policy: Policy) -> int:
+def _parse_classifier_output(out: str) -> ClassifierDecision:
+    numbers = re.findall(r"\d+(?:\.\d+)?", out or "")
+    score = 3
+    confidence = 1.0
+    if numbers:
+        score = max(1, min(5, int(float(numbers[0]))))
+    if len(numbers) >= 2:
+        confidence = max(0.0, min(1.0, float(numbers[1])))
+    return ClassifierDecision(score=score, confidence=confidence)
+
+
+def _escalate_tier(tier: str) -> str:
+    try:
+        idx = _TIER_ORDER.index(tier)
+    except ValueError:
+        return tier
+    if idx + 1 >= len(_TIER_ORDER):
+        return tier
+    nxt = _TIER_ORDER[idx + 1]
+    return nxt
+
+
+def _classifier_tier(score: int, confidence: float, policy: Policy) -> str:
+    tier = policy.classifier.score_to_tier.get(score, "mid")
+    confidence_floor = max(0.0, min(1.0, float(policy.classifier.confidence_floor)))
+    if confidence < confidence_floor:
+        tier = _escalate_tier(tier)
+    return tier
+
+
+def _classify(prompt: str, policy: Policy) -> ClassifierDecision:
     cls = policy.classifier
     msg = cls.prompt.format(prompt=prompt[:4000])
     try:
         resp = litellm.completion(
             model=cls.model,
             messages=[{"role": "user", "content": msg}],
-            max_tokens=4,
+            max_tokens=12,
             temperature=0,
         )
         out = resp["choices"][0]["message"]["content"].strip()
-        digit = next((c for c in out if c.isdigit()), "3")
-        return max(1, min(5, int(digit)))
+        return _parse_classifier_output(out)
     except Exception:
-        return 3  # safe middle on classifier failure
+        return ClassifierDecision(score=3, confidence=1.0)  # safe middle on classifier failure
+
+
+def would_have_tier(prompt: str, policy: Policy) -> str | None:
+    """Return the classifier-only tier for routing-quality comparison.
+
+    Skips when the classifier is disabled or unavailable so normal routing
+    does not manufacture noisy disagreement rows from missing provider keys.
+    """
+    if not policy.classifier.enabled:
+        return None
+    if not _provider_available(policy.classifier.model):
+        return None
+    classified = _classify(prompt, policy)
+    return _classifier_tier(classified.score, classified.confidence, policy)
 
 
 def route(prompt: str, policy: Policy, header_tier: str | None = None) -> RouteDecision:
@@ -177,10 +279,14 @@ def route(prompt: str, policy: Policy, header_tier: str | None = None) -> RouteD
 
     # Classifier fallback
     if policy.classifier.enabled:
-        score = _classify(prompt, policy)
-        tier = policy.classifier.score_to_tier.get(score, "mid")
+        classified = _classify(prompt, policy)
+        score = classified.score
+        tier = _classifier_tier(score, classified.confidence, policy)
         return RouteDecision(tier=tier, model=_pick_model(tier, policy),
-                             reason=f"classifier:score={score}")
+                             reason=(
+                                 f"classifier:score={score};"
+                                 f"confidence={classified.confidence:.2f}"
+                             ))
 
     # Default
     return RouteDecision(tier="cheap", model=_pick_model("cheap", policy),

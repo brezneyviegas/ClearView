@@ -19,6 +19,24 @@ rules:
   - name: explicit_override
     if: { header: x-clearview-tier }
     then: header_value
+  - name: long_prompt
+    if: { tokens_gte: 4000 }
+    then: frontier
+  - name: stack_trace
+    if: { stack_trace: true }
+    then: mid
+  - name: math_or_proof
+    if: { math_symbols: true }
+    then: mid
+  - name: url_context
+    if: { url: true }
+    then: mid
+  - name: code_context
+    if: { file_path: true }
+    then: mid
+  - name: unfenced_multiline_code
+    if: { multiline_code_no_fence: true }
+    then: mid
   - name: tiny_prompt
     if: { tokens_lt: 200, no_code: true }
     then: cheap
@@ -32,9 +50,9 @@ rules:
         - debug this stack
         - design system
     then: mid
-  - name: long_prompt
-    if: { tokens_gte: 4000 }
-    then: frontier
+  - name: imperative_work
+    if: { imperative: true, tokens_gte: 200 }
+    then: mid
   - name: medium_prompt
     if: { tokens_lt: 1500 }
     then: cheap
@@ -49,9 +67,13 @@ classifier:
     3 = moderate (small bug, short script).
     4 = hard (multi-file refactor, design choice).
     5 = expert (proof, architecture, novel algorithm).
-    Output ONLY the digit. No explanation.
+    Output ONLY: score,confidence
+    where score is 1-5 and confidence is 0.0-1.0.
+    Example: 4,0.82
+    No explanation.
     PROMPT:
     {prompt}
+  confidence_floor: 0.65
   score_to_tier:
     1: cheap
     2: cheap

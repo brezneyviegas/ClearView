@@ -47,6 +47,7 @@ class TestRecord:
             latency_ms=123,
             escalated=False,
             prompt_hash="deadbeef",
+            would_have_tier="mid",
         )
         record(rec)
 
@@ -58,6 +59,7 @@ class TestRecord:
         row = result["rows"][0]
         assert row["picked_model"] == "openai/gpt-4o-mini"
         assert row["route_reason"] == "rule:tiny_prompt"
+        assert row["would_have_tier"] == "mid"
 
     def test_default_request_id_unique(self):
         a = CallRecord(session_id="x")

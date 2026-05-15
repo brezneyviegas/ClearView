@@ -52,18 +52,31 @@ class TestTeamCRUD:
     def test_create_returns_token_and_persists(self, tmp_db):
         from app import teams
         teams.init_db()
-        t = teams.create(name="alpha", daily_usd_cap=5.0, allowed_tiers=["cheap", "mid"])
+        t = teams.create(
+            name="alpha",
+            daily_usd_cap=5.0,
+            allowed_tiers=["cheap", "mid"],
+            timezone_name="America/New_York",
+        )
         assert t.id.startswith("cv_team_")
         assert len(t.id) == len("cv_team_") + 32
         assert t.name == "alpha"
         assert t.daily_usd_cap == 5.0
         assert t.allowed_tiers == ["cheap", "mid"]
+        assert t.timezone == "America/New_York"
         assert t.enabled is True
 
         again = teams.get(t.id)
         assert again is not None
         assert again.id == t.id
         assert again.allowed_tiers == ["cheap", "mid"]
+        assert again.timezone == "America/New_York"
+
+    def test_create_rejects_unknown_timezone(self, tmp_db):
+        from app import teams
+        teams.init_db()
+        with pytest.raises(ValueError):
+            teams.create(name="bad-tz", timezone_name="Mars/Olympus")
 
     def test_get_missing_returns_none(self, tmp_db):
         from app import teams
@@ -312,11 +325,18 @@ class TestAdminTeamsCRUD:
         created = client.post("/admin/teams", json={"name": "patchme"}).json()
         team_id = created["id"]
         r = client.patch(f"/admin/teams/{team_id}", json={"daily_usd_cap": 9.99,
-                                                          "allowed_tiers": ["cheap"]})
+                                                          "allowed_tiers": ["cheap"],
+                                                          "timezone": "Europe/London"})
         assert r.status_code == 200
         body = r.json()
         assert body["daily_usd_cap"] == 9.99
         assert body["allowed_tiers"] == ["cheap"]
+        assert body["timezone"] == "Europe/London"
+
+    def test_patch_rejects_unknown_timezone(self, client):
+        created = client.post("/admin/teams", json={"name": "bad-tz"}).json()
+        r = client.patch(f"/admin/teams/{created['id']}", json={"timezone": "Mars/Olympus"})
+        assert r.status_code == 400
 
     def test_patch_unknown_404(self, client):
         r = client.patch("/admin/teams/cv_team_nope", json={"daily_usd_cap": 1})

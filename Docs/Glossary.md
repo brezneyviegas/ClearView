@@ -21,7 +21,9 @@ Examples: token-length thresholds, keyword matches (`refactor`, `architect`…),
 
 ### Classifier fallback
 When no rule matches, a single Haiku call rates the prompt complexity 1–5.
-Score maps to a tier via `classifier.score_to_tier`. Cheap insurance for ambiguous prompts.
+Score maps to a tier via `classifier.score_to_tier`. The classifier also returns a
+confidence value; below `classifier.confidence_floor`, ClearView escalates one tier.
+Cheap insurance for ambiguous prompts.
 
 ### Health filter
 Drops models whose provider API key is missing from env. Ollama is always considered
@@ -44,8 +46,8 @@ Capped by `max_retries`. The retry row in telemetry gets `escalated=1`.
 
 ### Route reason
 Human-readable string stored on each CallRecord explaining *why* this tier was picked
-(`rule:tiny_prompt`, `classifier:score=4`, `header_override`, etc.). Surfaced in the
-per-call modal.
+(`rule:tiny_prompt`, `classifier:score=4;confidence=0.82`, `header_override`, etc.).
+Surfaced in the per-call modal.
 
 ---
 

@@ -175,6 +175,26 @@ class TestChatLoginLogout:
         # Cookie cleared. The TestClient drops cleared cookies from its jar.
         assert "cv_session" not in client.cookies
 
+    def test_chat_me_returns_spend_and_caps(self, client):
+        from app import telemetry
+        t = _mint_team("meter", daily_usd_cap=1.0, monthly_usd_cap=10.0)
+        telemetry.record(telemetry.CallRecord(
+            session_id="chat",
+            team_id=t.id,
+            native_cost_usd=0.25,
+        ))
+        client.post("/chat/login", json={"token": t.id})
+
+        r = client.get("/chat/me")
+
+        assert r.status_code == 200
+        body = r.json()
+        assert body["team_name"] == "meter"
+        assert body["daily_usd_cap"] == 1.0
+        assert body["monthly_usd_cap"] == 10.0
+        assert body["daily_spend_usd"] == 0.25
+        assert body["monthly_spend_usd"] == 0.25
+
     def test_cookie_auth_works_on_v1_endpoint(self, client, monkeypatch, tmp_db):
         """Cookie session should authorise /v1/chat/completions just like Bearer."""
         _patch_completion(monkeypatch, FakeCompletion(content="hi", prompt_tokens=2, completion_tokens=1))
@@ -192,6 +212,23 @@ class TestChatLoginLogout:
         with sqlite3.connect(str(tmp_db)) as c:
             team_ids = [row[0] for row in c.execute("SELECT team_id FROM calls").fetchall()]
         assert t.id in team_ids
+
+    def test_model_options_requires_login(self, client):
+        r = client.get("/chat/model_options")
+        assert r.status_code == 401
+
+    def test_model_options_lists_providers_and_models(self, client):
+        t = _mint_team("models")
+        client.post("/chat/login", json={"token": t.id})
+
+        r = client.get("/chat/model_options")
+
+        assert r.status_code == 200
+        body = r.json()
+        providers = {p["id"]: p["models"] for p in body["providers"]}
+        assert "anthropic" in providers
+        assert any(m["id"] == "anthropic/claude-haiku-4-5" for m in providers["anthropic"])
+        assert any(m["id"] == "clearview-auto" for m in body["virtual_models"])
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +361,34 @@ class TestChatSend:
         assert captured["messages"][0]["content"] == "one"
         assert captured["messages"][-1]["content"] == "two"
 
+    def test_send_honors_direct_model_selection(self, client, monkeypatch):
+        captured: dict = {}
+
+        def fake_completion(**kwargs):
+            captured["model"] = kwargs.get("model")
+            return FakeCompletion(content="ack", prompt_tokens=1, completion_tokens=1)
+
+        from app import main
+        monkeypatch.setattr(main.litellm, "completion", fake_completion)
+
+        t = _mint_team("direct-model")
+        client.post("/chat/login", json={"token": t.id})
+        cid = client.post("/chat/conversations", json={"title": "m"}).json()["id"]
+
+        r = client.post(
+            f"/chat/conversations/{cid}/send",
+            json={
+                "content": "hi",
+                "tier": "cheap",
+                "model": "openai/gpt-4o",
+            },
+        )
+
+        assert r.status_code == 200
+        assert captured["model"] == "openai/gpt-4o"
+        assert r.json()["picked_model"] == "openai/gpt-4o"
+        assert r.json()["picked_tier"] == "mid"
+
 
 # ---------------------------------------------------------------------------
 # Streaming send (SSE)
@@ -392,6 +457,36 @@ class TestChatSendStream:
         assert [m["role"] for m in msgs] == ["user", "assistant"]
         assert msgs[1]["content"] == "hello world"
         assert msgs[1]["picked_tier"] == "cheap"
+
+    def test_send_stream_honors_direct_model_selection(self, client, monkeypatch):
+        _, cid = self._login_and_open(client, "stream-model")
+        captured: dict = {}
+
+        def fake_stream(**kwargs):
+            captured["model"] = kwargs.get("model")
+            return iter([
+                _FakeStreamChunk("ok"),
+                _FakeStreamChunk("", usage={"prompt_tokens": 2, "completion_tokens": 1}),
+            ])
+
+        _patch_completion(monkeypatch, fake_stream)
+
+        with client.stream(
+            "POST",
+            f"/chat/conversations/{cid}/send_stream",
+            json={"content": "hi", "tier": "cheap", "model": "openai/gpt-4o"},
+        ) as r:
+            assert r.status_code == 200
+            body = b"".join(r.iter_bytes()).decode()
+
+        assert captured["model"] == "openai/gpt-4o"
+        meta_lines = [
+            line for line in body.splitlines()
+            if line.startswith("data: ") and '"type": "metadata"' in line
+        ]
+        meta = json.loads(meta_lines[-1][len("data: "):])
+        assert meta["picked_model"] == "openai/gpt-4o"
+        assert meta["picked_tier"] == "mid"
 
     def test_send_stream_404_on_unknown_conv(self, client, monkeypatch):
         from app import teams

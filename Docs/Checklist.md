@@ -70,18 +70,18 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
         same-model skip, perfect-score path, fixture filter, gate pass/fail
         + backward-compatibility
 
-- [ ] **6. Routing-accuracy Layer 1 — tighten the pipeline** (start AFTER
+- [x] **6. Routing-accuracy Layer 1 — tighten the pipeline** (start AFTER
   items 1–5). Cheapest near-term wins to drive misroute rate down. Do in
   this order:
-  - [ ] Word-boundary regex on `contains_any` keyword matcher (fixes
+  - [x] Word-boundary regex on `contains_any` keyword matcher (fixes
         `refactor` matching `refactoreddata`)
-  - [ ] Classifier confidence floor — ask Haiku for `score, confidence`;
+  - [x] Classifier confidence floor — ask Haiku for `score, confidence`;
         escalate one tier when confidence is low
-  - [ ] Structural rules: detect stack traces, math symbols, file paths,
+  - [x] Structural rules: detect stack traces, math symbols, file paths,
         URLs, multiline code without fences, imperative vs question shape
-  - [ ] Refusal / short-output detector → escalate when cheap output
+  - [x] Refusal / short-output detector → escalate when cheap output
         length ≪ expected
-  - [ ] `would_have_tier` telemetry column + `/admin/routing_quality`
+  - [x] `would_have_tier` telemetry column + `/admin/routing_quality`
         page (operator sees disagreement rate between rule-pick and
         classifier-pick over time)
 
@@ -93,10 +93,10 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
 
 ## Idea-listed concerns still open
 
-- [ ] **Confidence floor on classifier** — Idea calls out as mitigation for
+- [x] **Confidence floor on classifier** — Idea calls out as mitigation for
       misclassified hard prompts. Today classifier always trusts its 1-5 score;
       no threshold-based escalation when the score is "borderline".
-- [ ] **Routing-overhead p95 benchmark** — Idea target <100ms. Never measured
+- [x] **Routing-overhead p95 benchmark** — Idea target <100ms. Never measured
       in isolation (CLI sub paths inflate end-to-end). Add `performance/`
       micro-benchmark.
 
@@ -104,13 +104,13 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
 
 ## Deck-roadmap items not yet built
 
-- [ ] Per-team timezone for monthly cap reset (UTC-only today)
-- [ ] Spend-vs-cap meter in `/chat` header
-- [ ] Word-boundary fix in keyword matcher (`contains_any`)
-- [ ] A/B shadow pairing for streaming primaries
-- [ ] Next.js read-only dashboard for finance/ops (open question: do we need
+- [x] Per-team timezone for monthly cap reset
+- [x] Spend-vs-cap meter in `/chat` header
+- [x] Word-boundary fix in keyword matcher (`contains_any`)
+- [x] A/B shadow pairing for streaming primaries
+- [-] Next.js read-only dashboard for finance/ops (open question: do we need
       it given server-rendered explorer already exists?)
-- [ ] Cost-ticker audio bell on price change (trader-vibe polish)
+- [x] Cost-ticker audio bell on price change (trader-vibe polish)
 
 ---
 

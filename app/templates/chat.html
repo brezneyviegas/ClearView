@@ -16,10 +16,13 @@
   a { color: var(--accent); text-decoration: none; }
   header { padding: 12px 20px; display: flex; align-items: center; gap: 14px;
            border-bottom: 1px solid var(--line); height: 52px; }
-  header .brand { font-family: var(--mono); font-weight: 600; letter-spacing: -.01em; }
-  header .brand .dot { color: var(--accent); }
-  header .team { color: var(--muted); font-family: var(--mono); font-size: 12px; }
-  header .spacer { flex: 1; }
+	  header .brand { font-family: var(--mono); font-weight: 600; letter-spacing: -.01em; }
+	  header .brand .dot { color: var(--accent); }
+	  header .team { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+	  header .cap-meter { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+	  header .cap-meter.warn { color: var(--warn); }
+	  header .cap-meter.hot { color: var(--pink); }
+	  header .spacer { flex: 1; }
   .btn { background: var(--panel); border: 1px solid var(--line); color: var(--text);
          padding: 6px 12px; border-radius: 6px; font-family: var(--mono); font-size: 12px;
          cursor: pointer; }
@@ -112,11 +115,16 @@
     outline: none; line-height: 1.45;
   }
   #composer textarea:focus { border-color: var(--accent); }
-  #composer .actions { display: flex; flex-direction: column; gap: 8px; align-items: stretch; }
+  #composer .actions {
+    display: grid; grid-template-columns: 128px 128px 220px auto;
+    gap: 8px; align-items: stretch;
+  }
   #composer select {
     background: var(--panel); border: 1px solid var(--line); color: var(--text);
     padding: 6px 10px; border-radius: 6px; font-family: var(--mono); font-size: 12px;
+    min-width: 0;
   }
+  #send-btn { min-width: 68px; }
   .hint { color: var(--muted); font-family: var(--mono); font-size: 11px; padding: 0 22px 8px; }
   .empty {
     color: var(--muted); font-family: var(--mono); font-size: 13px;
@@ -127,9 +135,10 @@
 <body>
 
 <header>
-  <div class="brand">▲ ClearView<span class="dot">.</span></div>
-  <div class="team" id="team-label">{% if logged_in %}team: {{ team_name }}{% endif %}</div>
-  <div class="spacer"></div>
+	  <div class="brand">▲ ClearView<span class="dot">.</span></div>
+	  <div class="team" id="team-label">{% if logged_in %}team: {{ team_name }}{% endif %}</div>
+	  <div class="cap-meter" id="cap-meter"></div>
+	  <div class="spacer"></div>
   <a class="btn" href="/admin/explorer">Explorer →</a>
   <button class="btn warn" id="logout-btn" style="{% if not logged_in %}display:none{% endif %}">Logout</button>
 </header>
@@ -167,6 +176,12 @@
           <option value="mid">mid</option>
           <option value="frontier">frontier</option>
         </select>
+        <select id="provider-select" title="Provider">
+          <option value="auto">provider auto</option>
+        </select>
+        <select id="model-select" title="Model">
+          <option value="auto">model auto</option>
+        </select>
         <button class="btn accent" id="send-btn">Send</button>
       </div>
     </div>
@@ -174,8 +189,14 @@
 </div>
 
 <script>
-const $ = (sel) => document.querySelector(sel);
-const state = { convs: [], activeId: null, sending: false, sessionTotal: 0 };
+	const $ = (sel) => document.querySelector(sel);
+	const state = {
+	  convs: [],
+	  activeId: null,
+	  sending: false,
+	  sessionTotal: 0,
+	  modelOptions: { providers: [] },
+	};
 
 function fmtUsd(v) {
   if (!v) return "$0";
@@ -184,7 +205,7 @@ function fmtUsd(v) {
   return "$" + v.toFixed(3);
 }
 
-async function api(path, opts = {}) {
+	async function api(path, opts = {}) {
   const r = await fetch(path, {
     credentials: "same-origin",
     headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
@@ -195,8 +216,65 @@ async function api(path, opts = {}) {
     try { detail = (await r.json()).detail || detail; } catch (_) {}
     throw new Error(detail);
   }
-  return r.json();
-}
+	  return r.json();
+	}
+
+	async function refreshMe() {
+	  try {
+	    const me = await api("/chat/me");
+	    renderCapMeter(me);
+	  } catch (_) {}
+	}
+
+	function renderCapMeter(me) {
+	  const el = $("#cap-meter");
+	  const dailyCap = me.daily_usd_cap || 0;
+	  const monthlyCap = me.monthly_usd_cap || 0;
+	  const dailySpend = me.daily_spend_usd || 0;
+	  const monthlySpend = me.monthly_spend_usd || 0;
+	  let label = "";
+	  let pct = 0;
+	  if (dailyCap > 0) {
+	    pct = Math.min(999, (dailySpend / dailyCap) * 100);
+	    label = `day ${fmtUsd(dailySpend)} / ${fmtUsd(dailyCap)} (${pct.toFixed(0)}%)`;
+	  } else if (monthlyCap > 0) {
+	    pct = Math.min(999, (monthlySpend / monthlyCap) * 100);
+	    label = `month ${fmtUsd(monthlySpend)} / ${fmtUsd(monthlyCap)} (${pct.toFixed(0)}%)`;
+	  }
+	  el.textContent = label;
+	  el.className = "cap-meter" + (pct >= 90 ? " hot" : (pct >= 70 ? " warn" : ""));
+	}
+
+	async function refreshModelOptions() {
+	  try {
+	    state.modelOptions = await api("/chat/model_options");
+	    renderProviderOptions();
+	    renderModelOptions();
+	  } catch (_) {}
+	}
+
+	function renderProviderOptions() {
+	  const el = $("#provider-select");
+	  const providers = (state.modelOptions.providers || []).map(p => p.id);
+	  el.innerHTML = '<option value="auto">provider auto</option>' +
+	    providers.map(p => `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join("");
+	}
+
+	function renderModelOptions() {
+	  const provider = $("#provider-select").value || "auto";
+	  const el = $("#model-select");
+	  let models = [];
+	  for (const p of state.modelOptions.providers || []) {
+	    if (provider === "auto" || p.id === provider) {
+	      models = models.concat((p.models || []).map(m => ({ ...m, provider: p.id })));
+	    }
+	  }
+	  models.sort((a, b) => (a.tier + a.id).localeCompare(b.tier + b.id));
+	  el.innerHTML = '<option value="auto">model auto</option>' + models.map(m => {
+	    const label = `${m.id} · ${m.tier}`;
+	    return `<option value="${escapeHtml(m.id)}">${escapeHtml(label)}</option>`;
+	  }).join("");
+	}
 
 // --- Login ----------------------------------------------------------------
 $("#login-btn").addEventListener("click", async () => {
@@ -207,9 +285,11 @@ $("#login-btn").addEventListener("click", async () => {
     const out = await api("/chat/login", { method: "POST", body: JSON.stringify({ token }) });
     $("#team-label").textContent = "team: " + out.team_name;
     $("#login").style.display = "none";
-    $("#app").classList.add("shown");
-    $("#logout-btn").style.display = "";
-    await refreshConvs();
+	    $("#app").classList.add("shown");
+	    $("#logout-btn").style.display = "";
+	    await refreshMe();
+	    await refreshModelOptions();
+	    await refreshConvs();
   } catch (e) {
     $("#login-err").textContent = e.message;
   }
@@ -339,8 +419,9 @@ async function send() {
   scrollThread();
 
   const tier = $("#tier-select").value || "auto";
+  const model = $("#model-select").value || "auto";
   try {
-    await sendStream(content, tier, pending, pendingBody);
+    await sendStream(content, tier, model, pending, pendingBody);
     refreshConvs();
   } catch (e) {
     pendingBody.textContent = "Error: " + e.message;
@@ -352,12 +433,12 @@ async function send() {
   }
 }
 
-async function sendStream(content, tier, pendingMsgEl, pendingBodyEl) {
+async function sendStream(content, tier, model, pendingMsgEl, pendingBodyEl) {
   const r = await fetch(`/chat/conversations/${state.activeId}/send_stream`, {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content, tier }),
+    body: JSON.stringify({ content, tier, model }),
   });
   if (!r.ok) {
     let detail = "stream request failed";
@@ -428,10 +509,11 @@ async function sendStream(content, tier, pendingMsgEl, pendingBodyEl) {
     tokens_out: metadata && metadata.tokens_out,
     latency_ms: metadata && metadata.latency_ms,
   });
-  if (metadata) {
-    state.sessionTotal += (metadata.native_cost_usd || 0) + (metadata.synth_cost_usd || 0);
-    updateCostHint(metadata);
-  }
+	  if (metadata) {
+	    state.sessionTotal += (metadata.native_cost_usd || 0) + (metadata.synth_cost_usd || 0);
+	    updateCostHint(metadata);
+	    refreshMe();
+	  }
   scrollThread();
 }
 
@@ -451,6 +533,7 @@ function updateCostHint(last) {
 }
 
 $("#send-btn").addEventListener("click", send);
+$("#provider-select").addEventListener("change", renderModelOptions);
 $("#input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
 });
@@ -463,6 +546,8 @@ $("#input").addEventListener("input", (e) => {
 
 // Boot
 {% if logged_in %}
+refreshMe().catch((e) => console.error(e));
+refreshModelOptions().catch((e) => console.error(e));
 refreshConvs().catch((e) => console.error(e));
 {% endif %}
 </script>

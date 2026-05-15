@@ -20,7 +20,7 @@ from . import cache, chat as chat_store, teams, telemetry
 from .config import Policy, baseline_model_env, load_policy
 from .pricing import cost_for, cost_per_1k_out, drift_pct
 from .providers import claude_cli, codex_cli, gemini_cli
-from .router import build_availability, route
+from .router import build_availability, route, would_have_tier
 
 log = logging.getLogger("clearview.main")
 
@@ -203,6 +203,50 @@ def _is_empty_response(resp: Any) -> bool:
     if content is None:
         return True
     if isinstance(content, str) and not content.strip():
+        return True
+    return False
+
+
+def _response_text(resp: Any) -> str:
+    d = _resp_to_dict(resp)
+    choices = d.get("choices") or []
+    if not choices:
+        return ""
+    msg = (choices[0] or {}).get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            p.get("text", "") for p in content
+            if isinstance(p, dict) and isinstance(p.get("text"), str)
+        )
+    return ""
+
+
+def _looks_refusal_or_too_short(resp: Any, prompt_text: str) -> bool:
+    text = _response_text(resp).strip()
+    if not text:
+        return False
+    low = text.lower()
+    refusal_markers = (
+        "as an ai",
+        "i can't",
+        "i cannot",
+        "i'm unable",
+        "i am unable",
+        "cannot help with that",
+        "can't help with that",
+        "i don't have enough",
+        "insufficient information",
+    )
+    if any(marker in low for marker in refusal_markers):
+        return True
+    prompt_words = len(prompt_text.split())
+    output_words = len(text.split())
+    if prompt_words >= 60 and output_words <= 12:
+        return True
+    if prompt_words >= 25 and output_words <= 4:
         return True
     return False
 
@@ -475,7 +519,22 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
             reason=f"virtual_model:{requested}",
         )
     else:
-        decision = route(prompt_text, pol, header_tier=header_tier)
+        direct_tier = _configured_model_tier(pol, requested)
+        if direct_tier:
+            from .router import RouteDecision
+            decision = RouteDecision(
+                tier=direct_tier,
+                model=requested,
+                reason=f"direct_model:{requested}",
+            )
+        else:
+            decision = route(prompt_text, pol, header_tier=header_tier)
+    classifier_tier: str | None = None
+    if os.environ.get("CLEARVIEW_ROUTING_QUALITY", "1") != "0":
+        try:
+            classifier_tier = would_have_tier(prompt_text, pol)
+        except Exception as e:  # noqa: BLE001
+            log.warning("routing quality classifier failed: %s", e)
 
     # --- Team tier-gating ---
     # If the team declared an `allowed_tiers` whitelist, refuse routes that
@@ -569,6 +628,7 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
 
     used_model = forward_kwargs["model"]
     empty_escalated = False
+    quality_escalated = False
 
     # --- Empty-response escalation (non-stream only) ---
     if not stream and pol.escalation.on_empty_response and _is_empty_response(resp):
@@ -594,6 +654,28 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
             retries_left -= 1
             if not _is_empty_response(resp):
                 break
+
+    # --- Refusal / suspiciously short response escalation (non-stream only) ---
+    if (
+        not stream
+        and used_tier != "frontier"
+        and not forced_tier
+        and not _is_empty_response(resp)
+        and _looks_refusal_or_too_short(resp, prompt_text)
+    ):
+        nxt = _next_tier(used_tier)
+        if nxt:
+            from .router import _pick_model
+            forward_kwargs["model"] = _pick_model(nxt, pol)
+            try:
+                resp_retry = _call_upstream(forward_kwargs, stream=False)
+            except Exception as e:
+                log.warning("quality retry to %s failed: %s", nxt, e)
+            else:
+                quality_escalated = True
+                used_model = forward_kwargs["model"]
+                used_tier = nxt
+                resp = resp_retry
 
     if stream:
         # Streaming primary: fire shadow as non-stream linked to this request_id.
@@ -628,7 +710,8 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
                             request_id=request_id,
                             cache_hash=cache_hash,
                             via_cli_stream=use_cli_stream,
-                            team_id=team_id),
+                            team_id=team_id,
+                            would_have_tier=classifier_tier),
             media_type="text/event-stream",
             headers=stream_headers,
         )
@@ -640,6 +723,8 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
         cache_hash=cache_hash,
         request_id=request_id,
         team_id=team_id,
+        quality_escalated=quality_escalated,
+        would_have_tier=classifier_tier,
     )
     if budget_warn_scope:
         response.headers["x-clearview-budget-warn"] = f"{budget_warn_scope}:true"
@@ -994,12 +1079,19 @@ async def gemini_stream_v1(model_name: str, request: Request) -> Any:
     return await _handle_gemini_generate(request, model_name, stream=True)
 
 
-def _build_route_reason(decision, escalated: bool, empty_escalated: bool) -> str:
+def _build_route_reason(
+    decision,
+    escalated: bool,
+    empty_escalated: bool,
+    quality_escalated: bool = False,
+) -> str:
     reason = decision.reason
     if escalated:
         reason += ";escalated"
     if empty_escalated:
         reason += ";empty_escalated"
+    if quality_escalated:
+        reason += ";quality_escalated"
     return reason
 
 
@@ -1008,7 +1100,9 @@ def _finalize_non_stream(resp: Any, decision, session_id, client_id, requested,
                          used_tier: str,
                          cache_hash: str | None = None,
                          request_id: str | None = None,
-                         team_id: str | None = None) -> tuple[JSONResponse, str, str]:
+                         team_id: str | None = None,
+                         quality_escalated: bool = False,
+                         would_have_tier: str | None = None) -> tuple[JSONResponse, str, str]:
     """Persist telemetry, optionally write to prompt cache, return (response, request_id, used_model)."""
     pol = _policy()
     latency_ms = int((time.perf_counter() - started) * 1000)
@@ -1042,7 +1136,9 @@ def _finalize_non_stream(resp: Any, decision, session_id, client_id, requested,
         picked_provider=used_model.split("/", 1)[0] if "/" in used_model else "unknown",
         picked_model=used_model,
         picked_tier=used_tier,
-        route_reason=_build_route_reason(decision, escalated, empty_escalated),
+        route_reason=_build_route_reason(
+            decision, escalated, empty_escalated, quality_escalated,
+        ),
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         native_cost_usd=native,
@@ -1050,10 +1146,11 @@ def _finalize_non_stream(resp: Any, decision, session_id, client_id, requested,
         drift_pct=drift_pct(native, plan_equiv),
         output_cost_per_1k=cost_per_1k_out(native, tokens_out),
         latency_ms=latency_ms,
-        escalated=escalated or empty_escalated,
+        escalated=escalated or empty_escalated or quality_escalated,
         prompt_hash=_hash_prompt_text(prompt_text),
         synth_cost_usd=synth,
         team_id=team_id,
+        would_have_tier=would_have_tier,
     )
     if request_id:
         rec_kwargs["request_id"] = request_id
@@ -1098,7 +1195,8 @@ async def _stream_and_log(resp, decision, session_id, client_id, requested,
                           request_id: str | None = None,
                           cache_hash: str | None = None,
                           via_cli_stream: bool = False,
-                          team_id: str | None = None):
+                          team_id: str | None = None,
+                          would_have_tier: str | None = None):
     """SSE-pump the upstream stream, accumulate text + usage, write telemetry,
     write the buffered text to the prompt cache on a successful single-call
     stream (i.e. no escalation), and emit a trailing `data: [DONE]\\n\\n`.
@@ -1181,6 +1279,7 @@ async def _stream_and_log(resp, decision, session_id, client_id, requested,
             prompt_hash=_hash_prompt_text(prompt_text),
             synth_cost_usd=synth,
             team_id=team_id,
+            would_have_tier=would_have_tier,
         )
         if request_id:
             rec_kwargs["request_id"] = request_id
@@ -1447,7 +1546,7 @@ async def admin_calls_detail(request: Request, session: str | None = None,
                    latency_ms, tokens_in, tokens_out,
                    native_cost_usd, plan_equiv_cost_usd, output_cost_per_1k,
                    route_reason, escalated, consensus_flag, shadow_of,
-                   prompt_hash, ts, virtual_model, status, team_id
+                   prompt_hash, ts, virtual_model, status, team_id, would_have_tier
             FROM calls {where}
             ORDER BY ts DESC LIMIT 200
             """,
@@ -1456,6 +1555,67 @@ async def admin_calls_detail(request: Request, session: str | None = None,
     finally:
         c.close()
     return {"rows": [dict(r) for r in rows]}
+
+
+@app.get("/admin/routing_quality")
+async def admin_routing_quality(request: Request, session: str | None = None,
+                                team: str | None = None, window: int = 24 * 60) -> dict:
+    """Classifier-vs-picked tier disagreement summary for operators."""
+    _admin_auth(request)
+    import sqlite3 as _sqlite3
+    from .config import db_path as _db_path
+
+    window = max(1, min(int(window or 24 * 60), 7 * 24 * 60))
+    start = time.time() - window * 60
+    clauses = ["ts >= ?", "would_have_tier IS NOT NULL", "picked_tier IS NOT NULL"]
+    params_l: list[Any] = [start]
+    if session:
+        clauses.append("session_id = ?")
+        params_l.append(session)
+    if team:
+        clauses.append("team_id = ?")
+        params_l.append(team)
+    where = "WHERE " + " AND ".join(clauses)
+
+    c = _sqlite3.connect(_db_path())
+    c.row_factory = _sqlite3.Row
+    try:
+        agg = c.execute(
+            f"""
+            SELECT
+                COUNT(*) AS calls,
+                COALESCE(SUM(CASE WHEN picked_tier != would_have_tier THEN 1 ELSE 0 END), 0)
+                    AS disagreements
+            FROM calls {where}
+            """,
+            tuple(params_l),
+        ).fetchone()
+        by_rule = c.execute(
+            f"""
+            SELECT route_reason, picked_tier, would_have_tier,
+                   COUNT(*) AS calls,
+                   COALESCE(SUM(CASE WHEN picked_tier != would_have_tier THEN 1 ELSE 0 END), 0)
+                       AS disagreements
+            FROM calls {where}
+            GROUP BY route_reason, picked_tier, would_have_tier
+            ORDER BY disagreements DESC, calls DESC
+            LIMIT 50
+            """,
+            tuple(params_l),
+        ).fetchall()
+    finally:
+        c.close()
+
+    calls = int(agg["calls"] or 0)
+    disagreements = int(agg["disagreements"] or 0)
+    rate = (disagreements / calls * 100.0) if calls else 0.0
+    return {
+        "window_minutes": window,
+        "calls": calls,
+        "disagreements": disagreements,
+        "disagreement_rate_pct": round(rate, 2),
+        "rows": [dict(r) for r in by_rule],
+    }
 
 
 @app.get("/admin/shadow_compare")
@@ -1751,6 +1911,7 @@ def _team_to_full_dict(t: teams.Team) -> dict:
         "allowed_tiers": list(t.allowed_tiers),
         "created_ts": t.created_ts,
         "enabled": t.enabled,
+        "timezone": t.timezone,
     }
 
 
@@ -1765,6 +1926,7 @@ def _team_to_redacted_dict(t: teams.Team) -> dict:
         "allowed_tiers": list(t.allowed_tiers),
         "created_ts": t.created_ts,
         "enabled": t.enabled,
+        "timezone": t.timezone,
     }
 
 
@@ -1787,6 +1949,7 @@ async def admin_create_team(request: Request) -> dict:
             daily_usd_cap=body.get("daily_usd_cap"),
             monthly_usd_cap=body.get("monthly_usd_cap"),
             allowed_tiers=allowed,
+            timezone_name=body.get("timezone") or "UTC",
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -1812,20 +1975,26 @@ async def admin_update_team(team_id: str, request: Request) -> dict:
     set_daily = "daily_usd_cap" in body
     set_monthly = "monthly_usd_cap" in body
     set_tiers = "allowed_tiers" in body
+    set_timezone = "timezone" in body
     enabled_val = body.get("enabled") if "enabled" in body else None
     if "allowed_tiers" in body and body["allowed_tiers"] is not None and \
             not isinstance(body["allowed_tiers"], list):
         raise HTTPException(status_code=400, detail="allowed_tiers must be a list")
-    t = teams.update(
-        team_id,
-        daily_usd_cap=body.get("daily_usd_cap"),
-        monthly_usd_cap=body.get("monthly_usd_cap"),
-        allowed_tiers=body.get("allowed_tiers"),
-        enabled=(bool(enabled_val) if enabled_val is not None else None),
-        _set_daily=set_daily,
-        _set_monthly=set_monthly,
-        _set_tiers=set_tiers,
-    )
+    try:
+        t = teams.update(
+            team_id,
+            daily_usd_cap=body.get("daily_usd_cap"),
+            monthly_usd_cap=body.get("monthly_usd_cap"),
+            allowed_tiers=body.get("allowed_tiers"),
+            timezone_name=body.get("timezone"),
+            enabled=(bool(enabled_val) if enabled_val is not None else None),
+            _set_daily=set_daily,
+            _set_monthly=set_monthly,
+            _set_tiers=set_tiers,
+            _set_timezone=set_timezone,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if t is None:
         raise HTTPException(status_code=404, detail="team not found")
     return _team_to_full_dict(t)
@@ -1893,6 +2062,21 @@ _CHAT_TIER_TO_MODEL = {
 }
 
 
+def _configured_model_tier(pol: Policy, model_id: str) -> str | None:
+    for tier, models in pol.tiers.items():
+        if model_id in models:
+            return tier
+    return None
+
+
+def _chat_model_id(body: dict) -> str:
+    requested_model = str((body or {}).get("model") or "").strip()
+    if requested_model and requested_model != "auto":
+        return requested_model
+    tier_key = ((body or {}).get("tier") or "auto").lower()
+    return _CHAT_TIER_TO_MODEL.get(tier_key, "clearview-auto")
+
+
 def _require_chat_team(request: Request) -> teams.Team:
     t = _resolve_team(request)
     if t is None:
@@ -1908,6 +2092,29 @@ async def chat_page(request: Request):
         "chat.html",
         {"logged_in": team is not None, "team_name": team.name if team else ""},
     )
+
+
+@app.get("/chat/model_options")
+async def chat_model_options(request: Request) -> dict:
+    _require_chat_team(request)
+    pol = _policy()
+    providers: dict[str, list[dict[str, str]]] = {}
+    for tier, models in pol.tiers.items():
+        for model in models:
+            provider = model.split("/", 1)[0] if "/" in model else "unknown"
+            providers.setdefault(provider, []).append({"id": model, "tier": tier})
+    return {
+        "providers": [
+            {"id": provider, "models": models}
+            for provider, models in sorted(providers.items())
+        ],
+        "virtual_models": [
+            {"id": "clearview-auto", "tier": "auto"},
+            {"id": "clearview-cheap", "tier": "cheap"},
+            {"id": "clearview-mid", "tier": "mid"},
+            {"id": "clearview-frontier", "tier": "frontier"},
+        ],
+    }
 
 
 @app.post("/chat/login")
@@ -1934,6 +2141,20 @@ async def chat_logout() -> JSONResponse:
     resp = JSONResponse({"ok": True})
     resp.delete_cookie("cv_session", path="/")
     return resp
+
+
+@app.get("/chat/me")
+async def chat_me(request: Request) -> dict:
+    team = _require_chat_team(request)
+    daily_spend = teams.today_spend(team.id)
+    monthly_spend = teams.month_spend(team.id)
+    return {
+        "team_name": team.name,
+        "daily_usd_cap": team.daily_usd_cap,
+        "monthly_usd_cap": team.monthly_usd_cap,
+        "daily_spend_usd": round(daily_spend, 6),
+        "monthly_spend_usd": round(monthly_spend, 6),
+    }
 
 
 @app.get("/chat/conversations")
@@ -1979,8 +2200,7 @@ async def chat_send(request: Request, cid: str) -> JSONResponse:
     user_text = (body or {}).get("content", "").strip()
     if not user_text:
         raise HTTPException(status_code=400, detail="content required")
-    tier_key = ((body or {}).get("tier") or "auto").lower()
-    model_id = _CHAT_TIER_TO_MODEL.get(tier_key, "clearview-auto")
+    model_id = _chat_model_id(body or {})
 
     # Persist user message first.
     chat_store.append_message(cid, "user", user_text)
@@ -2074,8 +2294,7 @@ async def chat_send_stream(request: Request, cid: str):
     user_text = (body or {}).get("content", "").strip()
     if not user_text:
         raise HTTPException(status_code=400, detail="content required")
-    tier_key = ((body or {}).get("tier") or "auto").lower()
-    model_id = _CHAT_TIER_TO_MODEL.get(tier_key, "clearview-auto")
+    model_id = _chat_model_id(body or {})
 
     chat_store.append_message(cid, "user", user_text)
 

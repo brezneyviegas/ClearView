@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from app import router
-from app.router import RouteDecision, _eval_rule, _pick_model, route
+from app.router import RouteDecision, _eval_rule, _parse_classifier_output, _pick_model, route
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +55,23 @@ class TestEvalRule:
             {"contains_any": ["REFACTOR"]}, "Refactor this", None
         ) is True
 
+    def test_contains_any_uses_word_boundaries(self):
+        assert _eval_rule(
+            {"contains_any": ["refactor"]}, "refactoreddata should not match", None
+        ) is False
+
+    def test_contains_any_phrase_uses_boundaries(self):
+        assert _eval_rule(
+            {"contains_any": ["debug this stack"]},
+            "please debug this stack trace",
+            None,
+        ) is True
+        assert _eval_rule(
+            {"contains_any": ["debug this stack"]},
+            "please predebug this stack trace",
+            None,
+        ) is False
+
     def test_contains_any_no_match(self):
         assert _eval_rule(
             {"contains_any": ["refactor"]}, "hello there", None
@@ -75,6 +92,26 @@ class TestEvalRule:
         assert _eval_rule(
             {"tokens_lt": 200, "no_code": True}, "```code```", None
         ) is False
+
+    def test_structural_stack_trace(self):
+        prompt = "Traceback (most recent call last):\n  File \"app.py\", line 2"
+        assert _eval_rule({"stack_trace": True}, prompt, None) is True
+
+    def test_structural_math_symbols(self):
+        assert _eval_rule({"math_symbols": True}, "derive x^2 = 4", None) is True
+
+    def test_structural_file_path(self):
+        assert _eval_rule({"file_path": True}, "open app/router.py", None) is True
+
+    def test_structural_url(self):
+        assert _eval_rule({"url": True}, "read https://example.com/a", None) is True
+
+    def test_structural_multiline_code_without_fence(self):
+        prompt = "def f(x):\n  return x + 1"
+        assert _eval_rule({"multiline_code_no_fence": True}, prompt, None) is True
+
+    def test_structural_imperative(self):
+        assert _eval_rule({"imperative": True}, "please fix this bug", None) is True
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +161,33 @@ class TestRoute:
         # Reason should NOT be explicit_override since the tier wasn't valid.
         assert "explicit_override" not in decision.reason
 
+    def test_stack_trace_routes_mid_before_tiny(self, policy):
+        prompt = "Traceback (most recent call last):\n  File \"app.py\", line 2"
+        decision = route(prompt, policy)
+        assert decision.tier == "mid"
+        assert decision.reason == "rule:stack_trace"
+
+    def test_math_routes_mid_before_tiny(self, policy):
+        decision = route("derive x^2 = 4", policy)
+        assert decision.tier == "mid"
+        assert decision.reason == "rule:math_or_proof"
+
+    def test_file_path_routes_mid_before_tiny(self, policy):
+        decision = route("fix app/router.py", policy)
+        assert decision.tier == "mid"
+        assert decision.reason == "rule:code_context"
+
+    def test_url_routes_mid_before_tiny(self, policy):
+        decision = route("read https://example.com/logs", policy)
+        assert decision.tier == "mid"
+        assert decision.reason == "rule:url_context"
+
+    def test_unfenced_multiline_code_routes_mid(self, policy):
+        prompt = "def f(x):\n  return x + 1"
+        decision = route(prompt, policy)
+        assert decision.tier == "mid"
+        assert decision.reason == "rule:unfenced_multiline_code"
+
     def test_long_prompt_routes_frontier(self, policy):
         prompt = "x" * 16001  # ~4000 tokens
         decision = route(prompt, policy)
@@ -145,7 +209,43 @@ class TestRoute:
         monkeypatch.setattr(router.litellm, "completion", lambda **kw: _Resp())
         decision = route(prompt, policy)
         assert decision.tier == "mid"  # score 4 → mid
-        assert decision.reason == "classifier:score=4"
+        assert decision.reason == "classifier:score=4;confidence=1.00"
+
+    def test_classifier_fallback_parses_confidence(self, policy, monkeypatch):
+        prompt = "```\nfoo\n```\n" + ("word " * 100)
+
+        class _Resp:
+            def __getitem__(self, k):
+                return {"choices": [{"message": {"content": "4,0.82"}}]}[k]
+
+        monkeypatch.setattr(router.litellm, "completion", lambda **kw: _Resp())
+        decision = route(prompt, policy)
+        assert decision.tier == "mid"
+        assert decision.reason == "classifier:score=4;confidence=0.82"
+
+    def test_classifier_low_confidence_escalates_one_tier(self, policy, monkeypatch):
+        prompt = "```\nfoo\n```\n" + ("word " * 100)
+
+        class _Resp:
+            def __getitem__(self, k):
+                return {"choices": [{"message": {"content": "2,0.40"}}]}[k]
+
+        monkeypatch.setattr(router.litellm, "completion", lambda **kw: _Resp())
+        decision = route(prompt, policy)
+        assert decision.tier == "mid"  # score 2 -> cheap, low confidence -> mid
+        assert decision.reason == "classifier:score=2;confidence=0.40"
+
+    def test_classifier_low_confidence_does_not_escalate_past_frontier(self, policy, monkeypatch):
+        prompt = "```\nfoo\n```\n" + ("word " * 100)
+
+        class _Resp:
+            def __getitem__(self, k):
+                return {"choices": [{"message": {"content": "5,0.10"}}]}[k]
+
+        monkeypatch.setattr(router.litellm, "completion", lambda **kw: _Resp())
+        decision = route(prompt, policy)
+        assert decision.tier == "frontier"
+        assert decision.reason == "classifier:score=5;confidence=0.10"
 
     def test_classifier_failure_defaults_to_3(self, policy, monkeypatch):
         prompt = "```\nfoo\n```\n" + ("word " * 100)
@@ -157,7 +257,7 @@ class TestRoute:
         decision = route(prompt, policy)
         # _classify returns 3 on exception → "mid".
         assert decision.tier == "mid"
-        assert decision.reason == "classifier:score=3"
+        assert decision.reason == "classifier:score=3;confidence=1.00"
 
     def test_classifier_clamps_out_of_range_digits(self, policy, monkeypatch):
         prompt = "```\nfoo\n```\n" + ("word " * 100)
@@ -170,7 +270,7 @@ class TestRoute:
         decision = route(prompt, policy)
         # 9 clamps to 5 → frontier.
         assert decision.tier == "frontier"
-        assert decision.reason == "classifier:score=5"
+        assert decision.reason == "classifier:score=5;confidence=1.00"
 
     def test_default_when_classifier_disabled(self, policy, monkeypatch):
         # Disable classifier and feed a prompt with no rule match.
@@ -187,3 +287,25 @@ def test_routedecision_dataclass_fields():
     assert d.tier == "cheap"
     assert d.model == "x"
     assert d.reason == "rule:foo"
+
+
+class TestParseClassifierOutput:
+    def test_digit_only_defaults_to_full_confidence(self):
+        out = _parse_classifier_output("4")
+        assert out.score == 4
+        assert out.confidence == 1.0
+
+    def test_score_and_confidence(self):
+        out = _parse_classifier_output("score=2 confidence=0.31")
+        assert out.score == 2
+        assert out.confidence == 0.31
+
+    def test_clamps_score_and_confidence(self):
+        out = _parse_classifier_output("9,1.7")
+        assert out.score == 5
+        assert out.confidence == 1.0
+
+    def test_empty_output_defaults_to_middle(self):
+        out = _parse_classifier_output("")
+        assert out.score == 3
+        assert out.confidence == 1.0

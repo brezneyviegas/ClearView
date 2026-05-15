@@ -232,6 +232,34 @@ class TestStreaming:
         # Telemetry row written after stream completes.
         assert _count_rows(tmp_db) == 1
 
+    def test_streaming_shadow_pairs_to_primary_request(self, client, monkeypatch):
+        from app import main
+        seen = []
+
+        async def _fake_shadow(**kw):
+            seen.append(kw)
+
+        chunks = [
+            _FakeStreamChunk("Hi"),
+            _FakeStreamChunk("", usage={"prompt_tokens": 4, "completion_tokens": 1}),
+        ]
+        _patch_completion(monkeypatch, iter(chunks))
+        monkeypatch.setattr(main, "_run_shadow", _fake_shadow)
+
+        with client.stream(
+            "POST",
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "stream": True},
+            headers={"x-clearview-shadow": "frontier"},
+        ) as r:
+            assert r.status_code == 200
+            request_id = r.headers["x-clearview-request-id"]
+            _body = b"".join(r.iter_bytes())
+
+        assert seen
+        assert seen[0]["primary_request_id"] == request_id
+        assert seen[0]["shadow_tier"] == "frontier"
+
 
 class TestCompatibilityShims:
     def test_anthropic_messages_returns_anthropic_shape(self, client, monkeypatch, tmp_db):
@@ -355,6 +383,37 @@ class TestUpstreamErrors:
         assert rows[0]["escalated"] == 1
         assert ";escalated" in rows[0]["route_reason"]
 
+    def test_refusal_response_escalates_one_tier(self, client, monkeypatch, tmp_db):
+        from app.main import POLICY
+
+        monkeypatch.setenv("CLEARVIEW_ROUTING_QUALITY", "0")
+        cheap_models = set(POLICY.tiers["cheap"])
+        mid_first = POLICY.tiers["mid"][0]
+        calls = []
+
+        def _refusal_then_ok(**kw):
+            calls.append(kw["model"])
+            if kw["model"] in cheap_models:
+                return FakeCompletion(content="I can't help with that", prompt_tokens=20,
+                                      completion_tokens=5)
+            return FakeCompletion(content="Here is the complete fix.", prompt_tokens=22,
+                                  completion_tokens=8)
+
+        _patch_completion(monkeypatch, _refusal_then_ok)
+
+        r = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["choices"][0]["message"]["content"] == "Here is the complete fix."
+        assert calls[0] in cheap_models
+        assert calls[-1] == mid_first
+        rows = _all_rows(tmp_db)
+        assert rows[0]["escalated"] == 1
+        assert ";quality_escalated" in rows[0]["route_reason"]
+
 
 # ---------------------------------------------------------------------------
 # Admin endpoints smoke
@@ -375,3 +434,26 @@ class TestAdmin:
         )
         r = client.get("/admin/stats")
         assert r.json()["kpis"]["calls"] == 1
+
+    def test_admin_routing_quality(self, client, tmp_db):
+        from app import telemetry
+
+        telemetry.record(telemetry.CallRecord(
+            session_id="rq",
+            picked_tier="cheap",
+            would_have_tier="mid",
+            route_reason="rule:tiny_prompt",
+        ))
+        telemetry.record(telemetry.CallRecord(
+            session_id="rq",
+            picked_tier="mid",
+            would_have_tier="mid",
+            route_reason="rule:stack_trace",
+        ))
+
+        r = client.get("/admin/routing_quality", params={"session": "rq"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["calls"] == 2
+        assert body["disagreements"] == 1
+        assert body["disagreement_rate_pct"] == 50.0

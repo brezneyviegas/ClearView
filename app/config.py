@@ -11,6 +11,7 @@ class ClassifierCfg(BaseModel):
     model: str
     prompt: str
     score_to_tier: dict[int, str]
+    confidence_floor: float = 0.65
 
 
 class EscalationCfg(BaseModel):

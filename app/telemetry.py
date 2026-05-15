@@ -50,6 +50,7 @@ _MIGRATIONS: list[str] = [
     "ALTER TABLE calls ADD COLUMN picked_tier TEXT",
     # team_id is nullable: anonymous (no Bearer header) calls stay supported.
     "ALTER TABLE calls ADD COLUMN team_id TEXT",
+    "ALTER TABLE calls ADD COLUMN would_have_tier TEXT",
 ]
 
 
@@ -76,6 +77,7 @@ class CallRecord:
     synth_cost_usd: float = 0.0
     picked_tier: str | None = None
     team_id: str | None = None
+    would_have_tier: str | None = None
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     ts: float = field(default_factory=time.time)
 
@@ -123,8 +125,8 @@ def record(call: CallRecord) -> None:
                 tokens_in, tokens_out,
                 native_cost_usd, plan_equiv_cost_usd, drift_pct, output_cost_per_1k,
                 latency_ms, escalated, consensus_flag, status, prompt_hash, shadow_of,
-                synth_cost_usd, picked_tier, team_id
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                synth_cost_usd, picked_tier, team_id, would_have_tier
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 call.request_id, call.session_id, call.ts, call.client_id, call.virtual_model,
@@ -136,6 +138,7 @@ def record(call: CallRecord) -> None:
                 float(call.synth_cost_usd or 0.0),
                 call.picked_tier,
                 call.team_id,
+                call.would_have_tier,
             ),
         )
 
@@ -251,7 +254,8 @@ def stats(session_id: str | None = None, team_id: str | None = None) -> dict:
             SELECT request_id, picked_provider, picked_model, picked_tier,
                    latency_ms, tokens_in, tokens_out,
                    native_cost_usd, plan_equiv_cost_usd, output_cost_per_1k,
-                   route_reason, escalated, consensus_flag, shadow_of, ts, team_id
+                   route_reason, escalated, consensus_flag, shadow_of, ts, team_id,
+                   would_have_tier
             FROM calls {where}
             ORDER BY ts DESC LIMIT 200
             """,

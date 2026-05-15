@@ -24,6 +24,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .config import db_path
 from .telemetry import _conn
@@ -51,6 +52,10 @@ CREATE TABLE IF NOT EXISTS teams (
 CREATE INDEX IF NOT EXISTS idx_teams_created_ts ON teams(created_ts);
 """
 
+_MIGRATIONS = [
+    "ALTER TABLE teams ADD COLUMN timezone TEXT NOT NULL DEFAULT 'UTC'",
+]
+
 
 @dataclass
 class Team:
@@ -61,11 +66,17 @@ class Team:
     allowed_tiers: list[str] = field(default_factory=list)
     created_ts: float = field(default_factory=time.time)
     enabled: bool = True
+    timezone: str = "UTC"
 
 
 def init_db() -> None:
     with _conn() as c:
         c.executescript(_SCHEMA)
+        for stmt in _MIGRATIONS:
+            try:
+                c.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
 
 
 def _tiers_to_csv(tiers: list[str] | None) -> str:
@@ -89,6 +100,7 @@ def _row_to_team(r: sqlite3.Row) -> Team:
         allowed_tiers=_csv_to_tiers(r["allowed_tiers"]),
         created_ts=float(r["created_ts"] or 0.0),
         enabled=bool(r["enabled"]),
+        timezone=r["timezone"] if "timezone" in r.keys() and r["timezone"] else "UTC",
     )
 
 
@@ -97,6 +109,7 @@ def create(
     daily_usd_cap: float | None = None,
     monthly_usd_cap: float | None = None,
     allowed_tiers: list[str] | None = None,
+    timezone_name: str = "UTC",
 ) -> Team:
     """Mint a new team. The returned `id` IS the Bearer token — store it now."""
     if not name or not name.strip():
@@ -104,14 +117,15 @@ def create(
     team_id = "cv_team_" + secrets.token_hex(16)  # 32 hex chars → 40-char id
     created_ts = time.time()
     tiers_csv = _tiers_to_csv(allowed_tiers)
+    tz = _validate_timezone(timezone_name)
     with _conn() as c:
         c.execute(
             """
             INSERT INTO teams (id, name, daily_usd_cap, monthly_usd_cap,
-                               allowed_tiers, created_ts, enabled)
-            VALUES (?, ?, ?, ?, ?, ?, 1)
+                               allowed_tiers, created_ts, enabled, timezone)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
             """,
-            (team_id, name.strip(), daily_usd_cap, monthly_usd_cap, tiers_csv, created_ts),
+            (team_id, name.strip(), daily_usd_cap, monthly_usd_cap, tiers_csv, created_ts, tz),
         )
     return Team(
         id=team_id,
@@ -121,6 +135,7 @@ def create(
         allowed_tiers=allowed_tiers or [],
         created_ts=created_ts,
         enabled=True,
+        timezone=tz,
     )
 
 
@@ -167,10 +182,12 @@ def update(
     daily_usd_cap: float | None = None,
     monthly_usd_cap: float | None = None,
     allowed_tiers: list[str] | None = None,
+    timezone_name: str | None = None,
     enabled: bool | None = None,
     _set_daily: bool = False,
     _set_monthly: bool = False,
     _set_tiers: bool = False,
+    _set_timezone: bool = False,
 ) -> Team | None:
     """Partial update. Pass `_set_*` flags to distinguish "leave field alone"
     from "set to None/empty". Callers in HTTP handlers detect "key in payload"
@@ -187,6 +204,9 @@ def update(
     if _set_tiers:
         sets.append("allowed_tiers = ?")
         params.append(_tiers_to_csv(allowed_tiers))
+    if _set_timezone:
+        sets.append("timezone = ?")
+        params.append(_validate_timezone(timezone_name or "UTC"))
     if enabled is not None:
         sets.append("enabled = ?")
         params.append(1 if enabled else 0)
@@ -200,6 +220,7 @@ def update(
         )
         if cur.rowcount == 0:
             return None
+    invalidate_spend_cache(team_id)
     return get(team_id)
 
 
@@ -212,11 +233,19 @@ def _utc_midnight_ts() -> float:
     return midnight.timestamp()
 
 
-def _utc_month_start_ts() -> float:
-    """First-of-month at UTC 00:00:00. Month rolls over deterministically; no
-    leap-second adjustment, no per-team timezone (deferred — operators with
-    multi-TZ teams will want this later)."""
-    now = datetime.now(timezone.utc)
+def _validate_timezone(name: str) -> str:
+    tz = (name or "UTC").strip() or "UTC"
+    try:
+        ZoneInfo(tz)
+    except ZoneInfoNotFoundError as e:
+        raise ValueError(f"unknown timezone: {tz}") from e
+    return tz
+
+
+def _month_start_ts(timezone_name: str = "UTC") -> float:
+    """First-of-month at local team timezone, returned as an absolute timestamp."""
+    tz = ZoneInfo(_validate_timezone(timezone_name))
+    now = datetime.now(tz)
     first = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     return first.timestamp()
 
@@ -256,7 +285,9 @@ def month_spend(team_id: str) -> float:
     cached = _month_spend_cache.get(team_id)
     if cached and (now - cached[0]) < _MONTH_SPEND_TTL:
         return cached[1]
-    val = _team_spend_since(team_id, _utc_month_start_ts())
+    team = get(team_id)
+    tz = team.timezone if team else "UTC"
+    val = _team_spend_since(team_id, _month_start_ts(tz))
     _month_spend_cache[team_id] = (now, val)
     return val
 
@@ -291,6 +322,8 @@ def _cli() -> int:
                           help="Monthly USD cap (omit → no team monthly cap).")
     p_create.add_argument("--tiers", type=str, default="",
                           help="CSV of allowed tiers (e.g. cheap,mid). Empty → all.")
+    p_create.add_argument("--timezone", type=str, default="UTC",
+                          help="IANA timezone for monthly cap reset (default: UTC).")
 
     sub.add_parser("list", help="List all teams.")
 
@@ -309,12 +342,14 @@ def _cli() -> int:
     if args.cmd == "create":
         tiers = _csv_to_tiers(args.tiers) if args.tiers else None
         t = create(args.name, daily_usd_cap=args.daily_cap,
-                   monthly_usd_cap=args.monthly_cap, allowed_tiers=tiers)
+                   monthly_usd_cap=args.monthly_cap, allowed_tiers=tiers,
+                   timezone_name=args.timezone)
         print(f"id:            {t.id}")
         print(f"name:          {t.name}")
         print(f"daily_cap:     {t.daily_usd_cap}")
         print(f"monthly_cap:   {t.monthly_usd_cap}")
         print(f"allowed_tiers: {','.join(t.allowed_tiers) or '(all)'}")
+        print(f"timezone:      {t.timezone}")
         print(f"created_ts:    {int(t.created_ts)}")
         print("")
         print("Authorization: Bearer " + t.id)
@@ -324,7 +359,7 @@ def _cli() -> int:
         for t in list_all():
             print(f"{t.id}  {t.name!r}  daily={t.daily_usd_cap}  "
                   f"monthly={t.monthly_usd_cap}  tiers={','.join(t.allowed_tiers) or '(all)'}  "
-                  f"enabled={t.enabled}")
+                  f"timezone={t.timezone}  enabled={t.enabled}")
         return 0
 
     if args.cmd == "disable":
