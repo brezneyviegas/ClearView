@@ -22,7 +22,11 @@ from typing import Any, AsyncIterator, Iterator
 from . import embeddings as _emb
 from .config import db_path
 
-SCHEMA = """
+# Table definition. Kept separate from index DDL so we can run column
+# migrations BEFORE the indexes that depend on the newly-added columns.
+# Upgrading a DB created by a pre-semantic-cache build would otherwise fail
+# on the team_id index before the ALTER TABLE could run.
+_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS prompt_cache (
     prompt_hash TEXT PRIMARY KEY,
     virtual_model TEXT,
@@ -35,6 +39,9 @@ CREATE TABLE IF NOT EXISTS prompt_cache (
     prompt_text TEXT,
     embedding BLOB
 );
+"""
+
+_INDEX_DDL = """
 CREATE INDEX IF NOT EXISTS idx_prompt_cache_ts ON prompt_cache(ts);
 CREATE INDEX IF NOT EXISTS idx_prompt_cache_team_ts ON prompt_cache(team_id, ts DESC);
 """
@@ -68,13 +75,18 @@ def _conn() -> Iterator[sqlite3.Connection]:
 
 def init_db() -> None:
     with _conn() as c:
-        c.executescript(SCHEMA)
+        # 1. Create the table (no-op if it already exists).
+        c.executescript(_TABLE_DDL)
+        # 2. Add columns the schema expects but older tables may lack. Must
+        #    happen before any index that references those columns.
         for stmt in _MIGRATIONS:
             try:
                 c.execute(stmt)
             except sqlite3.OperationalError:
                 # Column already exists. Safe to ignore.
                 pass
+        # 3. Now safe to create indexes that touch the new columns.
+        c.executescript(_INDEX_DDL)
 
 
 def enabled() -> bool:
