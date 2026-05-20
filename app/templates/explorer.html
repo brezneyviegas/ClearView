@@ -268,6 +268,18 @@
 
   /* Shadow compare panel */
   .sc-empty { padding: 18px 22px; color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .rq-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--line); }
+  .rq-card { background: var(--panel); padding: 16px 18px; }
+  .rq-val { font-family: var(--mono); font-size: 26px; font-weight: 600; color: var(--text); }
+  .rq-val.warn { color: var(--warn); }
+  .rq-val.good { color: var(--accent); }
+  .rq-lbl { margin-top: 6px; font-family: var(--mono); font-size: 10px; letter-spacing: .08em; color: var(--muted); }
+  #rq-rules table { width: 100%; border-collapse: collapse; }
+  #rq-rules th, #rq-rules td { padding: 7px 18px; text-align: left; font-size: 12px; border-top: 1px solid var(--line); }
+  #rq-rules th { color: var(--muted); font-family: var(--mono); font-size: 10px; letter-spacing: .06em; font-weight: 500; }
+  #rq-rules td.num, #rq-rules th.num { text-align: right; font-family: var(--mono); }
+  .rq-bar { height: 6px; background: var(--accent); border-radius: 3px; min-width: 2px; }
+  @media (max-width: 720px) { .rq-cards { grid-template-columns: repeat(2, 1fr); } }
   .sc-model { color: var(--text); font-weight: 600; }
   .sc-cost  { color: var(--muted); margin-left: 6px; }
   .sc-diff-pos { color: var(--pink); }
@@ -572,6 +584,19 @@
     </div>
   </div>
 
+  <div class="panel" id="routing-quality-panel">
+    <h2><span>&#127919; ROUTING QUALITY</span><span class="h2-meta" id="rq-meta">rule vs classifier · auto-shadow judge verdicts</span></h2>
+    <div id="routing-quality-container">
+      <div class="rq-cards">
+        <div class="rq-card"><div class="rq-val" id="rq-disagree">—</div><div class="rq-lbl">RULE↔CLASSIFIER DISAGREE</div></div>
+        <div class="rq-card"><div class="rq-val warn" id="rq-under">—</div><div class="rq-lbl">UNDER-ROUTE (shadow won)</div></div>
+        <div class="rq-card"><div class="rq-val good" id="rq-over">—</div><div class="rq-lbl">ROUTE CONFIRMED (primary won)</div></div>
+        <div class="rq-card"><div class="rq-val" id="rq-judged">—</div><div class="rq-lbl">PAIRS JUDGED</div></div>
+      </div>
+      <div id="rq-rules"></div>
+    </div>
+  </div>
+
   <div class="panel" id="shadow-compare-panel">
     <h2><span>&#128253; A/B SHADOW COMPARE</span><span class="h2-meta" id="shadow-compare-meta">primary vs shadow · last 50 pairs</span></h2>
     <div id="shadow-compare-container">
@@ -687,6 +712,7 @@
 	  let lastTickerPayload = null;   // full last /admin/ticker payload (for drill-down candles)
 	  let lastDetailRows = [];        // ordered last calls_detail rows (for trade tape, last 20 per model)
 	  let shadowCompareEnabled = true;
+	  let routingQualityEnabled = true;
 	  let bellEnabled = false;
 	  let audioCtx = null;
   // Drill-down panel state. selectedSymbol == null when closed.
@@ -1152,6 +1178,64 @@
     }
   }
 
+  async function fetchRoutingQuality() {
+    if (!routingQualityEnabled) return null;
+    try {
+      const [rqRes, hitsRes, verdictRes] = await Promise.all([
+        fetch("/admin/routing_quality" + (qs ? qs + "&window=1440" : "?window=1440")),
+        fetch("/admin/rule_hits" + (qs ? qs + "&window=1440" : "?window=1440")),
+        fetch("/admin/shadow_verdicts" + qs),
+      ]);
+      if (rqRes.status === 401 || rqRes.status === 403) {
+        routingQualityEnabled = false;
+        const panel = document.getElementById("routing-quality-panel");
+        if (panel) panel.style.display = "none";
+        return null;
+      }
+      if (!rqRes.ok) return null;
+      return {
+        rq: await rqRes.json(),
+        hits: hitsRes.ok ? await hitsRes.json() : { rows: [] },
+        verdicts: verdictRes.ok ? await verdictRes.json() : { judged: 0 },
+      };
+    } catch (e) {
+      console.warn("routing_quality fetch failed", e);
+      return null;
+    }
+  }
+
+  function renderRoutingQuality(payload) {
+    if (!payload) return;
+    const rq = payload.rq || {}, v = payload.verdicts || {}, hits = payload.hits || {};
+    const setTxt = (id, t) => { const el = document.getElementById(id); if (el) el.textContent = t; };
+    setTxt("rq-disagree", (rq.disagreement_rate_pct ?? 0) + "%");
+    setTxt("rq-judged", v.judged ?? 0);
+    setTxt("rq-under", v.judged ? (v.under_route_rate_pct ?? 0) + "%" : "—");
+    setTxt("rq-over", v.judged ? (v.over_route_rate_pct ?? 0) + "%" : "—");
+    setTxt("rq-meta", `${rq.calls ?? 0} routed · ${v.judged ?? 0} pairs judged · 24h`);
+
+    const rows = (hits.rows || []).slice(0, 12);
+    const wrap = document.getElementById("rq-rules");
+    if (!wrap) return;
+    if (rows.length === 0) {
+      wrap.innerHTML = '<div class="sc-empty">no routed calls in window</div>';
+      return;
+    }
+    const max = Math.max(...rows.map(r => Number(r.hits || 0)), 1);
+    let html = '<table><thead><tr><th>ROUTE REASON</th><th>TIER</th>'
+      + '<th class="num">HITS</th><th class="num">SHARE</th><th>&nbsp;</th></tr></thead><tbody>';
+    for (const r of rows) {
+      const w = Math.round(Number(r.hits || 0) / max * 100);
+      html += '<tr><td>' + escapeHTML(r.route_reason || "—") + '</td>'
+        + '<td>' + escapeHTML(r.picked_tier || "—") + '</td>'
+        + '<td class="num">' + (r.hits || 0) + '</td>'
+        + '<td class="num">' + (r.share_pct ?? 0) + '%</td>'
+        + '<td><div class="rq-bar" style="width:' + w + '%"></div></td></tr>';
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+  }
+
   function fmtSignedMoney(v) {
     const n = Number(v || 0);
     const abs = Math.abs(n);
@@ -1235,12 +1319,13 @@
 
   async function pollOnce() {
     try {
-      const [statsR, tsR, detailR, tickerR, shadowR] = await Promise.all([
+      const [statsR, tsR, detailR, tickerR, shadowR, rqR] = await Promise.all([
         fetch("/admin/stats" + qs).then(r => r.json()),
         fetch("/admin/timeseries" + (qs ? qs + "&window=60" : "?window=60")).then(r => r.json()),
         fetch("/admin/calls_detail" + qs).then(r => r.json()),
         fetchTicker(),
         fetchShadowCompare(),
+        fetchRoutingQuality(),
       ]);
       renderKpis(statsR.kpis);
       renderSessions(statsR.sessions);
@@ -1261,6 +1346,7 @@
         renderMarketPill(null, statsR.kpis);
       }
       if (shadowCompareEnabled) renderShadowCompare(shadowR);
+      if (routingQualityEnabled) renderRoutingQuality(rqR);
       if (selectedSymbol) renderTickerDetail();
       markRefreshed();
     } catch (e) {

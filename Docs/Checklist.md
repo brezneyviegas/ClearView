@@ -97,6 +97,8 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
   - [x] `/admin/rule_hits` — per-rule fire count + share
   - [x] 17 tests (`tests/test_auto_shadow.py`): gate, judge, verdict storage,
         HTTP auto-trigger, end-to-end judge→verdict
+  - [x] Explorer ROUTING QUALITY panel: disagree/under-route/over-route/judged
+        cards + per-rule hit-rate bars (`/admin/rule_hits` + `_verdicts`)
   - Note: streaming primaries skip the judge (text not materialized at
     shadow-launch); shadow itself still records.
 
