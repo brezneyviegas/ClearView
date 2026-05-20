@@ -9,6 +9,7 @@ from typing import Any
 
 import litellm
 
+from . import embed_classifier
 from .config import Policy
 
 CODE_FENCE_RE = re.compile(r"```")
@@ -279,7 +280,7 @@ def route(prompt: str, policy: Policy, header_tier: str | None = None) -> RouteD
             return RouteDecision(tier=tier, model=_pick_model(tier, policy),
                                  reason=f"rule:{rule.get('name', 'unnamed')}")
 
-    # Classifier fallback
+    # Classifier fallback (LLM)
     if policy.classifier.enabled:
         classified = _classify(prompt, policy)
         score = classified.score
@@ -290,6 +291,26 @@ def route(prompt: str, policy: Policy, header_tier: str | None = None) -> RouteD
                                  f"confidence={classified.confidence:.2f}"
                              ))
 
+    # Embedding-classifier fallback (Layer 3): when the LLM classifier is
+    # disabled, a kNN over the labelled corpus still routes better than a flat
+    # default. Opt-in via CLEARVIEW_EMBED_CLASSIFIER=1; no-op otherwise.
+    ec = embed_classifier.classify(prompt)
+    if ec is not None:
+        tier, conf = ec
+        if tier in policy.tiers:
+            return RouteDecision(tier=tier, model=_pick_model(tier, policy),
+                                 reason=f"embed_classifier:tier={tier};confidence={conf:.2f}")
+
     # Default
     return RouteDecision(tier="cheap", model=_pick_model("cheap", policy),
                          reason="default:cheap")
+
+
+def embed_would_have_tier(prompt: str, policy: Policy) -> str | None:
+    """Embedding-classifier tier for the routing-quality signal. None when the
+    embed classifier is disabled or can't score the prompt."""
+    ec = embed_classifier.classify(prompt)
+    if ec is None:
+        return None
+    tier, _conf = ec
+    return tier if tier in policy.tiers else None

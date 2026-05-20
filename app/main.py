@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import json
 import logging
@@ -17,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from . import cache, chat as chat_store, shadow_judge, teams, telemetry
+from . import cache, chat as chat_store, shadow_judge, teams, telemetry, tuner
 from .config import Policy, baseline_model_env, load_policy
 from .pricing import cost_for, cost_per_1k_out, drift_pct
 from .providers import claude_cli, codex_cli, gemini_cli
@@ -1509,6 +1510,29 @@ def _shadow_judge_model() -> str:
             or baseline_model_env() or _policy().baseline_model)
 
 
+@app.post("/feedback")
+async def post_feedback(request: Request) -> JSONResponse:
+    """Client-facing thumbs up/down on a served response (Layer 3 corpus).
+
+    Body: {"request_id": "...", "rating": 1 | -1, "note": "optional"}.
+    No admin auth — callers rate their own responses (request_id is the handle).
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid json"})
+    rating = body.get("rating")
+    if rating not in (1, -1, 1.0, -1.0) and not isinstance(rating, (int, float)):
+        return JSONResponse(status_code=400,
+                            content={"error": "rating must be 1 or -1"})
+    row = telemetry.record_feedback(
+        request_id=body.get("request_id"),
+        rating=int(rating),
+        note=body.get("note"),
+    )
+    return JSONResponse({"ok": True, "feedback": row})
+
+
 # --- admin views ---
 
 @app.get("/admin/stats")
@@ -1516,6 +1540,59 @@ async def admin_stats(request: Request, session: str | None = None,
                       team: str | None = None) -> dict:
     _admin_auth(request)
     return telemetry.stats(session_id=session, team_id=team)
+
+
+@app.get("/admin/feedback")
+async def admin_feedback(request: Request, team: str | None = None,
+                         window: int = 7 * 24 * 60) -> dict:
+    _admin_auth(request)
+    window = max(1, min(int(window or 7 * 24 * 60), 30 * 24 * 60))
+    return telemetry.feedback_summary(team_id=team, window_minutes=window)
+
+
+def _reload_policy() -> None:
+    """Re-read policy.yaml into the live POLICY + rebuild availability. Called
+    after the tuner mutates the file so routing picks up changes immediately."""
+    global POLICY
+    POLICY = load_policy()
+    build_availability(POLICY)
+
+
+@app.api_route("/admin/tune", methods=["GET", "POST"])
+async def admin_tune(request: Request, apply: int = 0, window: int = 7 * 24 * 60) -> dict:
+    """Online policy tuner (Layer 3). GET or POST without apply → dry-run
+    (proposals only). POST with ?apply=1 → back up policy.yaml, apply, reload.
+    """
+    _admin_auth(request)
+    window = max(1, min(int(window or 7 * 24 * 60), 30 * 24 * 60))
+    pol = _policy()
+    proposals = tuner.analyze(pol, window_minutes=window)
+    proposal_dicts = [dataclasses.asdict(p) for p in proposals]
+
+    if not (apply and request.method == "POST"):
+        return {"dry_run": True, "proposals": proposal_dicts,
+                "note": "POST with ?apply=1 to apply (backs up policy.yaml first)"}
+
+    result = tuner.apply(proposals)
+    if result["applied"]:
+        _reload_policy()
+    return {"dry_run": False, **result}
+
+
+@app.post("/admin/tune/revert")
+async def admin_tune_revert(request: Request) -> dict:
+    """Restore the most recent tuner backup of policy.yaml and reload."""
+    _admin_auth(request)
+    result = tuner.revert()
+    if result.get("reverted"):
+        _reload_policy()
+    return result
+
+
+@app.get("/admin/tune/history")
+async def admin_tune_history(request: Request, limit: int = 50) -> dict:
+    _admin_auth(request)
+    return {"history": telemetry.tune_history(limit=max(1, min(int(limit or 50), 200)))}
 
 
 @app.get("/admin/explorer", response_class=HTMLResponse)

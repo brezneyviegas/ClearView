@@ -55,6 +55,29 @@ CREATE TABLE IF NOT EXISTS shadow_verdict (
     note TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_verdict_ts ON shadow_verdict(ts);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT,
+    ts REAL NOT NULL,
+    rating INTEGER NOT NULL,   -- +1 thumbs-up, -1 thumbs-down
+    picked_tier TEXT,
+    route_reason TEXT,
+    prompt_hash TEXT,
+    team_id TEXT,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_feedback_ts ON feedback(ts);
+CREATE INDEX IF NOT EXISTS idx_feedback_request ON feedback(request_id);
+
+CREATE TABLE IF NOT EXISTS tuner_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    backup_path TEXT,           -- policy.yaml backup written before this apply
+    proposals_json TEXT,        -- the applied proposals (audit trail)
+    reverted INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_tuner_ts ON tuner_log(ts);
 """
 
 # Additive migrations applied on every init_db(). Each statement is wrapped in
@@ -180,6 +203,125 @@ def record_verdict(*, primary_request_id: str, shadow_request_id: str | None,
             (primary_request_id, shadow_request_id, time.time(), session_id, team_id,
              prompt_hash, picked_tier, shadow_tier, winner, score, judge_model, note),
         )
+
+
+def record_feedback(*, request_id: str | None, rating: int,
+                    note: str | None = None) -> dict:
+    """Record a thumbs up/down on a served response. Joins the calls row by
+    request_id to denormalise tier/reason/prompt_hash/team into the corpus so
+    the tuner can aggregate without a join. Returns the stored row."""
+    rating = 1 if rating >= 0 else -1
+    call = get_call(request_id) if request_id else None
+    row = {
+        "request_id": request_id,
+        "rating": rating,
+        "picked_tier": (call or {}).get("picked_tier"),
+        "route_reason": (call or {}).get("route_reason"),
+        "prompt_hash": (call or {}).get("prompt_hash"),
+        "team_id": (call or {}).get("team_id"),
+        "note": note,
+        "ts": time.time(),
+    }
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO feedback (request_id, ts, rating, picked_tier,
+                route_reason, prompt_hash, team_id, note)
+            VALUES (?,?,?,?,?,?,?,?)
+            """,
+            (row["request_id"], row["ts"], row["rating"], row["picked_tier"],
+             row["route_reason"], row["prompt_hash"], row["team_id"], row["note"]),
+        )
+    return row
+
+
+def feedback_summary(*, team_id: str | None = None, window_minutes: int = 7 * 24 * 60) -> dict:
+    """Aggregate feedback: totals + per-tier + per-rule down-vote rates."""
+    start = time.time() - window_minutes * 60
+    clauses = ["ts >= ?"]
+    params: list = [start]
+    if team_id:
+        clauses.append("team_id = ?")
+        params.append(team_id)
+    where = "WHERE " + " AND ".join(clauses)
+    with _conn() as c:
+        agg = c.execute(
+            f"""SELECT COUNT(*) AS n,
+                       COALESCE(SUM(CASE WHEN rating>0 THEN 1 ELSE 0 END),0) AS up,
+                       COALESCE(SUM(CASE WHEN rating<0 THEN 1 ELSE 0 END),0) AS down
+                FROM feedback {where}""",
+            tuple(params),
+        ).fetchone()
+        by_rule = c.execute(
+            f"""SELECT route_reason, picked_tier, COUNT(*) AS n,
+                       COALESCE(SUM(CASE WHEN rating<0 THEN 1 ELSE 0 END),0) AS down
+                FROM feedback {where}
+                GROUP BY route_reason, picked_tier
+                ORDER BY down DESC, n DESC LIMIT 50""",
+            tuple(params),
+        ).fetchall()
+    n = int(agg["n"] or 0)
+    down = int(agg["down"] or 0)
+    return {
+        "window_minutes": window_minutes,
+        "total": n,
+        "up": int(agg["up"] or 0),
+        "down": down,
+        "down_rate_pct": round(down / n * 100.0, 2) if n else 0.0,
+        "by_rule": [dict(r) for r in by_rule],
+    }
+
+
+def verdict_by_pair(window_minutes: int = 7 * 24 * 60) -> list[dict]:
+    """Per (picked_tier, shadow_tier): judged count + shadow-win count, used by
+    the tuner to spot systematic under-routing."""
+    start = time.time() - window_minutes * 60
+    with _conn() as c:
+        rows = c.execute(
+            """SELECT picked_tier, shadow_tier,
+                      COUNT(*) AS judged,
+                      COALESCE(SUM(CASE WHEN winner='shadow' THEN 1 ELSE 0 END),0) AS shadow_wins
+               FROM shadow_verdict
+               WHERE ts >= ? AND picked_tier IS NOT NULL AND shadow_tier IS NOT NULL
+               GROUP BY picked_tier, shadow_tier""",
+            (start,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def record_tune(*, backup_path: str, proposals_json: str) -> int:
+    """Log a tuner apply. Returns the new tuner_log id."""
+    with _conn() as c:
+        cur = c.execute(
+            "INSERT INTO tuner_log (ts, backup_path, proposals_json, reverted) "
+            "VALUES (?,?,?,0)",
+            (time.time(), backup_path, proposals_json),
+        )
+        return int(cur.lastrowid)
+
+
+def latest_tune(include_reverted: bool = False) -> dict | None:
+    """Most recent tuner_log row (default: only un-reverted)."""
+    q = "SELECT * FROM tuner_log"
+    if not include_reverted:
+        q += " WHERE reverted = 0"
+    q += " ORDER BY ts DESC LIMIT 1"
+    with _conn() as c:
+        row = c.execute(q).fetchone()
+    return dict(row) if row else None
+
+
+def mark_tune_reverted(tune_id: int) -> None:
+    with _conn() as c:
+        c.execute("UPDATE tuner_log SET reverted = 1 WHERE id = ?", (tune_id,))
+
+
+def tune_history(limit: int = 50) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT * FROM tuner_log ORDER BY ts DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def today_spend() -> float:

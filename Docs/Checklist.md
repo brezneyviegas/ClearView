@@ -102,8 +102,27 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
   - Note: streaming primaries skip the judge (text not materialized at
     shadow-launch); shadow itself still records.
 
-  Layer 3 (much later): embedding-based classifier + thumbs-up/down
-  feedback corpus + online policy tuning.
+- [x] **8. Routing-accuracy Layer 3 — embed classifier + feedback + tuner.**
+  - [x] Thumbs feedback corpus: `feedback` table + `telemetry.record_feedback()`
+        (denormalises tier/reason/prompt_hash from the calls row) +
+        `POST /feedback` (client-facing, no admin auth) + `/admin/feedback` summary
+  - [x] Embedding classifier (`app/embed_classifier.py`): cosine-weighted kNN
+        over labelled corpus (seeded from `eval/fixtures.json`), reuses
+        `app.embeddings`. Added as router fallback when LLM classifier disabled,
+        env-gated `CLEARVIEW_EMBED_CLASSIFIER=1`. `embed_would_have_tier()` signal.
+  - [x] Online tuner (`app/tuner.py`, auto-apply + guardrails): analyses
+        feedback down-votes (rule tier bump) + shadow under-route verdicts
+        (confidence-floor bump) → mutates policy.yaml. Backs up to
+        `policy.yaml.bak.<ts>`, logs to `tuner_log`, `revert()` restores.
+        `/admin/tune` (dry-run; POST `?apply=1` applies + hot-reloads policy),
+        `/admin/tune/revert`, `/admin/tune/history`. Conservative env thresholds
+        (`CLEARVIEW_TUNE_MIN_FEEDBACK/_DOWNVOTE_PCT/_MIN_PAIRS/_UNDER_ROUTE_PCT`).
+  - [x] 13 tests (`tests/test_layer3.py`) + end-to-end local verify. 260 pass.
+  - Note: with `medium_prompt` catch-all in policy.yaml, the embed-classifier
+    fallback only fires for 1500–4000-token non-matching prompts (narrow by
+    design — it's a fallback, not the primary path).
+
+  All three routing-accuracy layers (1, 2, 3) now built.
 
 ---
 
@@ -155,4 +174,4 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
 
 ---
 
-_Last touched: 2026-05-20. Update this date when you change the list._
+_Last touched: 2026-05-20 (Layer 3). Update this date when you change the list._
