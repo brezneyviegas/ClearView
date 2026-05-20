@@ -9,6 +9,23 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
 
 ## Priority queue
 
+- [x] **9. Adapt to user's setup (zero-config) + setup doctor.**
+  - [x] Built-in mock/echo provider (`app/providers/mock.py`): canned $0
+        responses, always callable, no keys/CLI/ollama. `CLEARVIEW_USE_MOCK=1`
+        routes everything to it (offline demo); non-stream + stream + pricing $0.
+  - [x] Graceful tier fallback (`router._pick_model`): escalate up → drop down →
+        any declared tier → mock. App never dead-ends on missing providers.
+  - [x] On-failure mock fallback (`main`): upstream error with no real
+        escalation target serves the mock instead of 502 (default on;
+        `CLEARVIEW_MOCK_ON_FAILURE=0` restores hard 502).
+  - [x] Setup doctor (`app/doctor.py`): probes keys, CLIs (claude/codex/gemini),
+        ollama; reports availability + targeted recommendations; generates a
+        tailored policy.yaml (prune unreachable models, backfill empty tiers
+        with mock, disable unreachable classifier). `python -m app.doctor
+        [--json|--write --out]`. `/admin/setup` returns the report + tailor notes.
+  - [x] 15 tests (`tests/test_setup.py`) + reworked upstream-error tests. 275 pass.
+
+
 - [x] **1. Test coverage for chat + codex_cli** — `tests/test_chat.py` (22 tests)
   + `tests/test_codex_cli.py` (18 tests). Full suite: 137 passing.
   - [x] Unit: `chat.py` table CRUD (create, list, append, delete, scoping)
@@ -174,4 +191,4 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
 
 ---
 
-_Last touched: 2026-05-20 (Layer 3). Update this date when you change the list._
+_Last touched: 2026-05-20 (Layer 3 + zero-config setup). Update this date when you change the list._

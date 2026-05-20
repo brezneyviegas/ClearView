@@ -21,7 +21,7 @@ from fastapi.templating import Jinja2Templates
 from . import cache, chat as chat_store, shadow_judge, teams, telemetry, tuner
 from .config import Policy, baseline_model_env, load_policy
 from .pricing import cost_for, cost_per_1k_out, drift_pct
-from .providers import claude_cli, codex_cli, gemini_cli
+from .providers import claude_cli, codex_cli, gemini_cli, mock as mock_provider
 from .router import build_availability, route, would_have_tier
 
 log = logging.getLogger("clearview.main")
@@ -120,6 +120,8 @@ def _call_upstream(forward_kwargs: dict, stream: bool):
     see `chat_completions` for the dispatch.
     """
     model = forward_kwargs.get("model", "")
+    if mock_provider.is_available_model(model):
+        return mock_provider.completion(model=model, messages=forward_kwargs["messages"])
     if (not stream) and claude_cli.is_enabled() and claude_cli.is_available_model(model):
         try:
             return claude_cli.completion(
@@ -157,6 +159,8 @@ async def _acall_upstream(forward_kwargs: dict) -> Any:
     only need non-stream.
     """
     model = forward_kwargs.get("model", "")
+    if mock_provider.is_available_model(model):
+        return await mock_provider.acompletion(model=model, messages=forward_kwargs["messages"])
     if claude_cli.is_enabled() and claude_cli.is_available_model(model):
         try:
             return await claude_cli.acompletion(
@@ -587,14 +591,20 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
     # Streaming + CLI path: claude_cli.astream returns a native async iterator
     # of OpenAI-style chunk dicts (terminated by literal "[DONE]"). For
     # everything else, fall back to litellm's sync iterator via _call_upstream.
+    use_mock_stream = stream and mock_provider.is_available_model(forward_kwargs["model"])
     use_cli_stream = (
         stream
         and claude_cli.is_enabled()
         and claude_cli.is_available_model(forward_kwargs["model"])
-    )
+    ) or use_mock_stream
 
     try:
-        if use_cli_stream:
+        if use_mock_stream:
+            resp = mock_provider.astream(
+                model=forward_kwargs["model"],
+                messages=messages,
+            )
+        elif use_cli_stream:
             resp = claude_cli.astream(
                 model=forward_kwargs["model"],
                 messages=messages,
@@ -602,23 +612,19 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
         else:
             resp = _call_upstream(forward_kwargs, stream)
     except Exception as e:
+        # Find a real escalation target (a tier with an available, non-mock
+        # model other than the one that just failed).
+        chosen = None
         if pol.escalation.on_error and decision.tier != "frontier":
-            # Use availability-filtered frontier list so we don't try a model
-            # whose provider key isn't set. Walk up tiers if frontier is empty.
             from .router import _AVAILABLE
-            chosen = None
             for t in ("frontier", "mid", "cheap"):
-                models = _AVAILABLE.get(t) or []
+                models = [m for m in (_AVAILABLE.get(t) or [])
+                          if not mock_provider.is_available_model(m)]
                 if models and t != decision.tier:
                     chosen = (t, models[0])
                     break
-            if chosen is None:
-                _log_failure(session_id, client_id, requested, decision, prompt_text, str(e),
-                             request_id=request_id, team_id=team_id)
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"upstream error and no escalation target available: {e}",
-                ) from e
+
+        if chosen is not None:
             escalated = True
             used_tier, forward_kwargs["model"] = chosen
             # Escalation re-issues the full call; always non-stream so we have a
@@ -629,17 +635,21 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
             try:
                 resp = _call_upstream(esc_kwargs, stream=False)
             except Exception as e2:
-                _log_failure(session_id, client_id, requested, decision, prompt_text, str(e2),
-                             request_id=request_id, team_id=team_id)
-                raise HTTPException(status_code=502, detail=f"upstream error: {e2}") from e2
-            # If the original request was streaming, the escalated reply is a
-            # plain chat.completion dict — finalize it as non-stream below.
+                resp = _mock_fallback_or_502(
+                    e2, forward_kwargs, messages, session_id, client_id,
+                    requested, decision, prompt_text, request_id, team_id)
             stream = False
             use_cli_stream = False
         else:
-            _log_failure(session_id, client_id, requested, decision, prompt_text, str(e),
-                         request_id=request_id, team_id=team_id)
-            raise HTTPException(status_code=502, detail=f"upstream error: {e}") from e
+            # No real alternative — serve the built-in mock so the app never
+            # hard-fails for lack of a backend (gated by CLEARVIEW_MOCK_ON_FAILURE).
+            resp = _mock_fallback_or_502(
+                e, forward_kwargs, messages, session_id, client_id,
+                requested, decision, prompt_text, request_id, team_id)
+            escalated = True
+            used_tier = "mock"
+            stream = False
+            use_cli_stream = False
 
     used_model = forward_kwargs["model"]
     empty_escalated = False
@@ -1452,6 +1462,19 @@ async def _run_shadow(*, shadow_tier: str, primary_request_id: str | None,
             )
 
 
+def _mock_fallback_or_502(err, forward_kwargs, messages, session_id, client_id,
+                          requested, decision, prompt_text, request_id, team_id):
+    """Last-resort: serve the built-in mock so the app stays up when no real
+    provider works. Set CLEARVIEW_MOCK_ON_FAILURE=0 to surface a 502 instead."""
+    if os.environ.get("CLEARVIEW_MOCK_ON_FAILURE", "1") == "0":
+        _log_failure(session_id, client_id, requested, decision, prompt_text, str(err),
+                     request_id=request_id, team_id=team_id)
+        raise HTTPException(status_code=502, detail=f"upstream error: {err}") from err
+    log.warning("upstream failed (%s); serving built-in mock provider", str(err)[:200])
+    forward_kwargs["model"] = mock_provider.MODEL
+    return mock_provider.completion(model=mock_provider.MODEL, messages=messages)
+
+
 def _log_failure(session_id, client_id, requested, decision, prompt_text, err,
                  request_id: str | None = None, team_id: str | None = None):
     kw = dict(
@@ -1548,6 +1571,18 @@ async def admin_feedback(request: Request, team: str | None = None,
     _admin_auth(request)
     window = max(1, min(int(window or 7 * 24 * 60), 30 * 24 * 60))
     return telemetry.feedback_summary(team_id=team, window_minutes=window)
+
+
+@app.get("/admin/setup")
+async def admin_setup(request: Request) -> dict:
+    """Setup-doctor report: which providers are reachable + recommendations.
+    Plus a preview of how the current policy.yaml tiers tailor to this machine.
+    """
+    _admin_auth(request)
+    from . import doctor
+    report = doctor.probe()
+    _data, notes = doctor.tailor_policy(_policy(), report)
+    return {**report, "tailor_notes": notes}
 
 
 def _reload_policy() -> None:

@@ -333,8 +333,12 @@ class TestCompatibilityShims:
 # ---------------------------------------------------------------------------
 
 class TestUpstreamErrors:
-    def test_frontier_failure_returns_502(self, client, monkeypatch, tmp_db):
-        # Force tier=frontier via virtual model so escalation can't kick in.
+    def test_frontier_failure_returns_502_when_mock_fallback_disabled(
+            self, client, monkeypatch, tmp_db):
+        # CLEARVIEW_MOCK_ON_FAILURE=0 restores the hard-fail behaviour: a
+        # frontier failure with no escalation target surfaces a 502.
+        monkeypatch.setenv("CLEARVIEW_MOCK_ON_FAILURE", "0")
+
         def _boom(**_kw):
             raise RuntimeError("upstream blew up")
 
@@ -353,6 +357,25 @@ class TestUpstreamErrors:
         rows = _all_rows(tmp_db)
         assert len(rows) == 1
         assert rows[0]["status"].startswith("error:")
+
+    def test_frontier_failure_degrades_to_mock_by_default(self, client, monkeypatch, tmp_db):
+        # Default behaviour: never hard-fail for lack of a backend — serve the
+        # built-in mock instead of a 502.
+        def _boom(**_kw):
+            raise RuntimeError("upstream blew up")
+
+        _patch_completion(monkeypatch, _boom)
+
+        r = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "clearview-frontier",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        assert r.status_code == 200
+        assert r.json()["model"] == "mock/echo"
+        assert "mock provider" in r.json()["choices"][0]["message"]["content"]
 
     def test_escalation_on_cheap_failure(self, client, monkeypatch, tmp_db):
         """Cheap failure → escalate to frontier; frontier succeeds."""

@@ -6,8 +6,10 @@ import litellm
 
 def cost_for(model: str, tokens_in: int, tokens_out: int) -> float:
     """USD cost for a single call given a model and token counts."""
-    # Local models are free.
+    # Local models and the built-in mock provider are free.
     if model.startswith("ollama/") or model.startswith("ollama_chat/"):
+        return 0.0
+    if model.startswith("mock/"):
         return 0.0
     try:
         return float(

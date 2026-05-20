@@ -10,6 +10,7 @@ from typing import Any
 import litellm
 
 from . import embed_classifier
+from .providers import mock as _mock
 from .config import Policy
 
 CODE_FENCE_RE = re.compile(r"```")
@@ -62,6 +63,9 @@ class ClassifierDecision:
 
 def _provider_available(model: str) -> bool:
     """Decide if a given prefixed model id is callable based on env var presence."""
+    if model.startswith("mock/"):
+        # The mock provider is always callable — it needs no setup.
+        return True
     if model.startswith("ollama/") or model.startswith("ollama_chat/"):
         return True
     if model.startswith("anthropic/"):
@@ -160,6 +164,9 @@ def _eval_rule(cond: dict[str, Any], prompt: str, header_tier: str | None) -> bo
 
 def _pick_model(tier: str, policy: Policy) -> str:
     """Pick first available model in tier; if none, escalate up tier ladder."""
+    # Explicit mock mode: route everything to the built-in mock (offline demo).
+    if _mock.is_enabled():
+        return _mock.MODEL
     if tier not in policy.tiers:
         tier = "cheap"
     # If availability not yet built (e.g. tests calling _pick_model directly),
@@ -179,6 +186,7 @@ def _pick_model(tier: str, policy: Policy) -> str:
     except ValueError:
         start_idx = 0
 
+    # 1) Prefer the requested tier, then escalate UP the ladder.
     for idx in range(start_idx, len(_TIER_ORDER)):
         t = _TIER_ORDER[idx]
         models = avail.get(t) or []
@@ -190,12 +198,23 @@ def _pick_model(tier: str, policy: Policy) -> str:
                 )
             return models[0]
 
-    # Nothing available anywhere — fall back to first declared model in requested tier.
-    fallback = policy.tiers.get(tier) or policy.tiers.get("cheap") or []
-    if not fallback:
-        raise RuntimeError("no models configured in any tier")
-    log.error("no provider keys set for any tier; using configured default %s", fallback[0])
-    return fallback[0]
+    # 2) Nothing upward — drop DOWN to any cheaper tier that IS available.
+    for idx in range(start_idx - 1, -1, -1):
+        t = _TIER_ORDER[idx]
+        models = avail.get(t) or []
+        if models:
+            log.warning("tier %s unavailable; falling back DOWN to %s", tier, t)
+            return models[0]
+
+    # 3) Also scan any non-ladder tiers the operator may have declared.
+    for t, models in avail.items():
+        if t not in _TIER_ORDER and models:
+            return models[0]
+
+    # 4) Nothing reachable anywhere — use the built-in mock provider so the app
+    #    still serves (zero-setup). It needs no keys/CLI/ollama.
+    log.error("no provider reachable for any tier; using built-in mock provider")
+    return _mock.MODEL
 
 
 def _parse_classifier_output(out: str) -> ClassifierDecision:

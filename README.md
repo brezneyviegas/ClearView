@@ -17,10 +17,27 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 
 cp .env.example .env
-# Fill in provider keys or enable local CLI subscription adapters.
+# Optional: fill in provider keys or enable local CLI subscription adapters.
+# ClearView runs with ZERO providers — see "Adapts to your setup" below.
 
 uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
+
+### Adapts to your setup
+
+ClearView works with whatever you have — and works with nothing at all:
+
+```bash
+python -m app.doctor          # probe keys / CLIs / ollama, get recommendations
+python -m app.doctor --write  # rewrite policy.yaml tailored to this machine
+```
+
+- **No provider configured?** Requests are served by a built-in **mock** provider
+  ($0, canned responses) so the dashboard, chat, and APIs all work out of the box.
+  `CLEARVIEW_USE_MOCK=1` forces everything through it (offline demo).
+- **A tier has no reachable model?** Routing gracefully falls back (up → down →
+  mock) instead of erroring. Set `CLEARVIEW_MOCK_ON_FAILURE=0` to get hard 502s.
+- `GET /admin/setup` returns the same probe report as JSON for the UI.
 
 Open:
 
