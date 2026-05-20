@@ -39,6 +39,22 @@ CREATE TABLE IF NOT EXISTS calls (
 );
 CREATE INDEX IF NOT EXISTS idx_calls_session ON calls(session_id);
 CREATE INDEX IF NOT EXISTS idx_calls_ts ON calls(ts);
+
+CREATE TABLE IF NOT EXISTS shadow_verdict (
+    primary_request_id TEXT PRIMARY KEY,
+    shadow_request_id TEXT,
+    ts REAL NOT NULL,
+    session_id TEXT,
+    team_id TEXT,
+    prompt_hash TEXT,
+    picked_tier TEXT,
+    shadow_tier TEXT,
+    winner TEXT,            -- 'primary' | 'shadow' | 'tie'
+    score INTEGER,          -- judge 1-5: shadow graded against primary as reference
+    judge_model TEXT,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_verdict_ts ON shadow_verdict(ts);
 """
 
 # Additive migrations applied on every init_db(). Each statement is wrapped in
@@ -140,6 +156,29 @@ def record(call: CallRecord) -> None:
                 call.team_id,
                 call.would_have_tier,
             ),
+        )
+
+
+def record_verdict(*, primary_request_id: str, shadow_request_id: str | None,
+                   session_id: str | None, team_id: str | None,
+                   prompt_hash: str | None, picked_tier: str | None,
+                   shadow_tier: str | None, winner: str, score: int | None,
+                   judge_model: str | None, note: str | None = None) -> None:
+    """Upsert one shadow-vs-primary judge verdict (Layer-2 misroute corpus)."""
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO shadow_verdict (
+                primary_request_id, shadow_request_id, ts, session_id, team_id,
+                prompt_hash, picked_tier, shadow_tier, winner, score, judge_model, note
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(primary_request_id) DO UPDATE SET
+                shadow_request_id=excluded.shadow_request_id,
+                ts=excluded.ts, winner=excluded.winner, score=excluded.score,
+                judge_model=excluded.judge_model, note=excluded.note
+            """,
+            (primary_request_id, shadow_request_id, time.time(), session_id, team_id,
+             prompt_hash, picked_tier, shadow_tier, winner, score, judge_model, note),
         )
 
 

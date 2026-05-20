@@ -85,9 +85,34 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
         page (operator sees disagreement rate between rule-pick and
         classifier-pick over time)
 
-  Layer 2 (later): LLM-as-judge auto-shadow + per-rule hit-rate table.
+- [x] **7. Routing-accuracy Layer 2 — auto-shadow + judge + hit-rate.**
+  - [x] Auto-shadow on rule/classifier disagreement, env-gated
+        (`CLEARVIEW_AUTO_SHADOW=disagree`, `CLEARVIEW_AUTO_SHADOW_RATE`),
+        manual `x-clearview-shadow` header still wins
+  - [x] LLM-as-judge on the pair (`app/shadow_judge.py`), grades shadow vs
+        served primary 1-5 → winner primary/shadow/tie. `CLEARVIEW_AUTO_SHADOW_JUDGE=1`,
+        `CLEARVIEW_SHADOW_JUDGE_MODEL` (default policy baseline)
+  - [x] `shadow_verdict` table + `telemetry.record_verdict()` (misroute corpus)
+  - [x] `/admin/shadow_verdicts` — under/over-route rate, by-pair breakdown, recent
+  - [x] `/admin/rule_hits` — per-rule fire count + share
+  - [x] 17 tests (`tests/test_auto_shadow.py`): gate, judge, verdict storage,
+        HTTP auto-trigger, end-to-end judge→verdict
+  - Note: streaming primaries skip the judge (text not materialized at
+    shadow-launch); shadow itself still records.
+
   Layer 3 (much later): embedding-based classifier + thumbs-up/down
   feedback corpus + online policy tuning.
+
+---
+
+## Hardening (done)
+
+- [x] **Classifier silent-swallow** — `_classify` now logs (warning + exc_info)
+      on litellm failure before falling back to mid tier. Ops can see classifier
+      outages instead of silent tier-3 routing.
+- [x] **Soft-cap race documented** — budget enforcement block in `main.py` notes
+      the read-check-then-act window (5s TTL cache, cost known only post-call);
+      hard cap would need estimate-reserve-reconcile. Accepted for a soft guard.
 
 ---
 
@@ -128,4 +153,4 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
 
 ---
 
-_Last touched: 2026-05-15. Update this date when you change the list._
+_Last touched: 2026-05-20. Update this date when you change the list._

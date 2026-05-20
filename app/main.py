@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -16,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
-from . import cache, chat as chat_store, teams, telemetry
+from . import cache, chat as chat_store, shadow_judge, teams, telemetry
 from .config import Policy, baseline_model_env, load_policy
 from .pricing import cost_for, cost_per_1k_out, drift_pct
 from .providers import claude_cli, codex_cli, gemini_cli
@@ -454,6 +455,14 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
     # --- Budget enforcement (per-team daily → per-team monthly → global daily) ---
     # First breach wins. Team caps always reject. Global cap still honors
     # policy.budget.on_breach (reject/warn/allow).
+    #
+    # KNOWN LIMITATION (soft cap): these are best-effort, not hard guarantees.
+    # Spend is only known *after* the upstream call, and reads here use a 5s TTL
+    # cache, so N concurrent requests can each observe spent < cap and all pass
+    # before any commits its cost — overshooting by up to N in-flight calls.
+    # Acceptable for a budget guard. A hard cap needs estimate-reserve-reconcile
+    # (reserve projected cost atomically pre-call, reconcile actual post-call),
+    # tracked as Layer-1 hardening in Docs/Checklist.md.
     budget_warn_scope: str | None = None
     if team is not None:
         if team.daily_usd_cap is not None and team.daily_usd_cap > 0:
@@ -535,6 +544,11 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
             classifier_tier = would_have_tier(prompt_text, pol)
         except Exception as e:  # noqa: BLE001
             log.warning("routing quality classifier failed: %s", e)
+
+    # Auto-shadow (Layer 2): on rule/classifier disagreement, shadow the tier
+    # the classifier would have chosen. Manual header wins if already set.
+    if shadow_tier is None:
+        shadow_tier = _auto_shadow_tier(decision.tier, classifier_tier)
 
     # --- Team tier-gating ---
     # If the team declared an `allowed_tiers` whitelist, refuse routes that
@@ -684,12 +698,14 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
                 shadow_tier=shadow_tier,
                 primary_request_id=request_id,
                 primary_model=used_model,
+                primary_tier=used_tier,
                 messages=messages,
                 body=body,
                 session_id=session_id,
                 client_id=client_id,
                 requested=requested,
                 prompt_text=prompt_text,
+                primary_text="",  # not materialized at stream start; judge skipped
                 team_id=team_id,
             ))
         # Budget-warn header: scope name (e.g. "global_daily") if a breach
@@ -735,12 +751,14 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
             shadow_tier=shadow_tier,
             primary_request_id=primary_request_id,
             primary_model=primary_model,
+            primary_tier=used_tier,
             messages=messages,
             body=body,
             session_id=session_id,
             client_id=client_id,
             requested=requested,
             prompt_text=prompt_text,
+            primary_text=_response_text(resp),
             team_id=team_id,
         ))
 
@@ -1316,7 +1334,8 @@ async def _stream_and_log(resp, decision, session_id, client_id, requested,
 async def _run_shadow(*, shadow_tier: str, primary_request_id: str | None,
                       primary_model: str, messages: list[dict[str, Any]], body: dict,
                       session_id: str, client_id: str | None, requested: str,
-                      prompt_text: str, team_id: str | None = None) -> None:
+                      prompt_text: str, team_id: str | None = None,
+                      primary_tier: str | None = None, primary_text: str = "") -> None:
     """Fire a shadow upstream call for offline cost+quality comparison.
 
     Runs after the client already has the primary response. Errors are swallowed
@@ -1380,7 +1399,9 @@ async def _run_shadow(*, shadow_tier: str, primary_request_id: str | None,
     baseline = baseline_model_env() or pol.baseline_model
     plan_equiv = cost_for(baseline, tokens_in, tokens_out)
 
+    shadow_request_id = uuid.uuid4().hex
     telemetry.record(telemetry.CallRecord(
+        request_id=shadow_request_id,
         session_id=session_id,
         client_id=client_id,
         virtual_model=requested,
@@ -1404,6 +1425,31 @@ async def _run_shadow(*, shadow_tier: str, primary_request_id: str | None,
     if team_id:
         teams.invalidate_spend_cache(team_id)
 
+    # LLM-judge the pair → misroute corpus. Requires the primary response text,
+    # which streaming primaries don't materialize at shadow-launch time.
+    if primary_request_id and _shadow_judge_enabled() and primary_text.strip():
+        shadow_text = _response_text(resp)
+        verdict = await asyncio.to_thread(
+            shadow_judge.judge,
+            prompt=prompt_text,
+            primary_text=primary_text,
+            shadow_text=shadow_text,
+            judge_model=_shadow_judge_model(),
+        )
+        if verdict:
+            telemetry.record_verdict(
+                primary_request_id=primary_request_id,
+                shadow_request_id=shadow_request_id,
+                session_id=session_id,
+                team_id=team_id,
+                prompt_hash=_hash_prompt_text(prompt_text),
+                picked_tier=primary_tier,
+                shadow_tier=shadow_tier,
+                winner=verdict["winner"],
+                score=verdict["score"],
+                judge_model=_shadow_judge_model(),
+            )
+
 
 def _log_failure(session_id, client_id, requested, decision, prompt_text, err,
                  request_id: str | None = None, team_id: str | None = None):
@@ -1426,6 +1472,41 @@ def _log_failure(session_id, client_id, requested, decision, prompt_text, err,
 
 def _hash_prompt_text(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+# --- auto-shadow (routing-accuracy Layer 2) ---
+# CLEARVIEW_AUTO_SHADOW=disagree  -> auto-fire a shadow to the tier the
+#   classifier would have picked whenever it disagrees with the routed tier.
+# CLEARVIEW_AUTO_SHADOW_RATE=0..1 -> sampling fraction (default 1.0).
+# CLEARVIEW_AUTO_SHADOW_JUDGE=1   -> grade each pair with an LLM judge.
+# CLEARVIEW_SHADOW_JUDGE_MODEL    -> judge model (default: policy baseline).
+
+def _auto_shadow_tier(picked_tier: str | None, classifier_tier: str | None) -> str | None:
+    """Return the tier to auto-shadow, or None. Only fires on rule/classifier
+    disagreement, when sampled in. Manual x-clearview-shadow header takes
+    precedence (handled by caller)."""
+    mode = os.environ.get("CLEARVIEW_AUTO_SHADOW", "off").strip().lower()
+    if mode != "disagree":
+        return None
+    if not classifier_tier or not picked_tier or classifier_tier == picked_tier:
+        return None
+    try:
+        rate = float(os.environ.get("CLEARVIEW_AUTO_SHADOW_RATE", "1.0"))
+    except ValueError:
+        rate = 1.0
+    rate = max(0.0, min(1.0, rate))
+    if rate < 1.0 and random.random() >= rate:
+        return None
+    return classifier_tier
+
+
+def _shadow_judge_enabled() -> bool:
+    return os.environ.get("CLEARVIEW_AUTO_SHADOW_JUDGE", "0").strip() == "1"
+
+
+def _shadow_judge_model() -> str:
+    return (os.environ.get("CLEARVIEW_SHADOW_JUDGE_MODEL")
+            or baseline_model_env() or _policy().baseline_model)
 
 
 # --- admin views ---
@@ -1615,6 +1696,126 @@ async def admin_routing_quality(request: Request, session: str | None = None,
         "disagreements": disagreements,
         "disagreement_rate_pct": round(rate, 2),
         "rows": [dict(r) for r in by_rule],
+    }
+
+
+@app.get("/admin/rule_hits")
+async def admin_rule_hits(request: Request, team: str | None = None,
+                          window: int = 24 * 60) -> dict:
+    """Per-rule hit-rate table (Layer 2): how often each route_reason fires,
+    as a share of all routed (non-shadow) calls in the window."""
+    _admin_auth(request)
+    import sqlite3 as _sqlite3
+    from .config import db_path as _db_path
+
+    window = max(1, min(int(window or 24 * 60), 7 * 24 * 60))
+    start = time.time() - window * 60
+    clauses = ["ts >= ?", "shadow_of IS NULL"]
+    params_l: list[Any] = [start]
+    if team:
+        clauses.append("team_id = ?")
+        params_l.append(team)
+    where = "WHERE " + " AND ".join(clauses)
+
+    c = _sqlite3.connect(_db_path())
+    c.row_factory = _sqlite3.Row
+    try:
+        rows = c.execute(
+            f"""
+            SELECT route_reason, picked_tier,
+                   COUNT(*) AS hits,
+                   COALESCE(SUM(native_cost_usd), 0) AS native_usd
+            FROM calls {where}
+            GROUP BY route_reason, picked_tier
+            ORDER BY hits DESC
+            LIMIT 100
+            """,
+            tuple(params_l),
+        ).fetchall()
+    finally:
+        c.close()
+
+    total = sum(int(r["hits"]) for r in rows) or 1
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["share_pct"] = round(int(r["hits"]) / total * 100.0, 2)
+        out.append(d)
+    return {"window_minutes": window, "total_calls": total, "rows": out}
+
+
+@app.get("/admin/shadow_verdicts")
+async def admin_shadow_verdicts(request: Request, team: str | None = None,
+                                window: int = 7 * 24 * 60, limit: int = 100) -> dict:
+    """Auto-shadow judge verdicts (Layer 2 misroute corpus).
+
+    `under_route_rate_pct` = share of judged pairs where the alternative
+    (shadow) tier beat what we served → policy is routing too cheap.
+    `over_route_rate_pct`  = share where the served tier won → route was right
+    (and, when shadow was cheaper, confirms we could route even cheaper).
+    """
+    _admin_auth(request)
+    import sqlite3 as _sqlite3
+    from .config import db_path as _db_path
+
+    window = max(1, min(int(window or 7 * 24 * 60), 30 * 24 * 60))
+    limit = max(1, min(int(limit or 100), 500))
+    start = time.time() - window * 60
+    clauses = ["ts >= ?"]
+    params_l: list[Any] = [start]
+    if team:
+        clauses.append("team_id = ?")
+        params_l.append(team)
+    where = "WHERE " + " AND ".join(clauses)
+
+    c = _sqlite3.connect(_db_path())
+    c.row_factory = _sqlite3.Row
+    try:
+        agg = c.execute(
+            f"""
+            SELECT
+                COUNT(*) AS judged,
+                COALESCE(SUM(CASE WHEN winner='shadow' THEN 1 ELSE 0 END), 0) AS shadow_wins,
+                COALESCE(SUM(CASE WHEN winner='primary' THEN 1 ELSE 0 END), 0) AS primary_wins,
+                COALESCE(SUM(CASE WHEN winner='tie' THEN 1 ELSE 0 END), 0) AS ties
+            FROM shadow_verdict {where}
+            """,
+            tuple(params_l),
+        ).fetchone()
+        by_pair = c.execute(
+            f"""
+            SELECT picked_tier, shadow_tier, winner, COUNT(*) AS n
+            FROM shadow_verdict {where}
+            GROUP BY picked_tier, shadow_tier, winner
+            ORDER BY n DESC LIMIT 50
+            """,
+            tuple(params_l),
+        ).fetchall()
+        recent = c.execute(
+            f"""
+            SELECT primary_request_id, shadow_request_id, ts, prompt_hash,
+                   picked_tier, shadow_tier, winner, score, judge_model
+            FROM shadow_verdict {where}
+            ORDER BY ts DESC LIMIT ?
+            """,
+            tuple(params_l) + (limit,),
+        ).fetchall()
+    finally:
+        c.close()
+
+    judged = int(agg["judged"] or 0)
+    shadow_wins = int(agg["shadow_wins"] or 0)
+    primary_wins = int(agg["primary_wins"] or 0)
+    return {
+        "window_minutes": window,
+        "judged": judged,
+        "shadow_wins": shadow_wins,
+        "primary_wins": primary_wins,
+        "ties": int(agg["ties"] or 0),
+        "under_route_rate_pct": round(shadow_wins / judged * 100.0, 2) if judged else 0.0,
+        "over_route_rate_pct": round(primary_wins / judged * 100.0, 2) if judged else 0.0,
+        "by_pair": [dict(r) for r in by_pair],
+        "recent": [dict(r) for r in recent],
     }
 
 

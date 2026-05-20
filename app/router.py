@@ -240,6 +240,8 @@ def _classify(prompt: str, policy: Policy) -> ClassifierDecision:
         out = resp["choices"][0]["message"]["content"].strip()
         return _parse_classifier_output(out)
     except Exception:
+        log.warning("classifier call failed (model=%s); falling back to mid tier",
+                    cls.model, exc_info=True)
         return ClassifierDecision(score=3, confidence=1.0)  # safe middle on classifier failure
 
 
