@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ClearView — Showcase</title>
+<style>
+  :root{
+    --bg:#0d0f12; --panel:#14181d; --line:#1f262d; --text:#e6edf3;
+    --muted:#8b95a1; --green:#41d985; --amber:#ffb84d; --pink:#ff6b9d;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --sans:ui-sans-serif,system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--text); font-family:var(--sans);
+    overflow:hidden; -webkit-font-smoothing:antialiased;
+  }
+  .deck{height:100vh;width:100vw;position:relative}
+  .slide{
+    position:absolute; inset:0; display:none; flex-direction:column;
+    justify-content:center; padding:6vh 8vw; opacity:0;
+    transition:opacity .35s ease;
+  }
+  .slide.active{display:flex; opacity:1}
+  .kicker{
+    font-family:var(--mono); font-size:.8rem; letter-spacing:.18em;
+    text-transform:uppercase; color:var(--muted); margin-bottom:1.2rem;
+  }
+  h1{font-size:clamp(2.6rem,7vw,5rem); letter-spacing:-.02em; line-height:1.02}
+  h1 .accent{color:var(--green)}
+  h2{
+    font-size:clamp(1.6rem,3.4vw,2.6rem); color:var(--green);
+    letter-spacing:-.01em; margin-bottom:1.8rem; border-bottom:2px solid var(--green);
+    padding-bottom:.5rem; display:inline-block;
+  }
+  .lead{font-size:clamp(1.1rem,2.2vw,1.6rem); color:var(--muted); margin-top:1.4rem; max-width:60ch; line-height:1.5}
+  ul{list-style:none; display:flex; flex-direction:column; gap:1.1rem; margin-top:.5rem}
+  li{font-size:clamp(1rem,1.9vw,1.45rem); line-height:1.4; padding-left:1.6rem; position:relative}
+  li::before{content:"▸"; color:var(--green); position:absolute; left:0}
+  li .q{color:var(--amber)}
+  code,.mono{font-family:var(--mono)}
+  .code{
+    background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:1rem 1.2rem; font-family:var(--mono); font-size:clamp(.85rem,1.5vw,1.15rem);
+    color:var(--amber); margin-top:1.6rem; display:inline-block;
+  }
+  .flow{
+    display:flex; align-items:center; gap:1rem; flex-wrap:wrap; margin-top:2rem;
+    font-family:var(--mono); font-size:clamp(.8rem,1.5vw,1.1rem);
+  }
+  .node{
+    background:var(--panel); border:1px solid var(--line); border-radius:8px;
+    padding:.8rem 1.1rem;
+  }
+  .node.hot{border-color:var(--green); color:var(--green)}
+  .arrow{color:var(--muted)}
+  .kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:1px; background:var(--line); border:1px solid var(--line); border-radius:10px; overflow:hidden; margin-top:1rem}
+  .kpi{background:var(--panel); padding:1.8rem 1.4rem}
+  .kpi .v{font-family:var(--mono); font-size:clamp(1.6rem,3.6vw,2.8rem); font-weight:600}
+  .kpi .v.green{color:var(--green)} .kpi .v.amber{color:var(--amber)} .kpi .v.pink{color:var(--pink)}
+  .kpi .l{margin-top:.6rem; font-family:var(--mono); font-size:.72rem; letter-spacing:.08em; color:var(--muted); text-transform:uppercase}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:1.4rem 3rem; margin-top:1rem}
+  .feat{padding-left:1.6rem; position:relative; font-size:clamp(1rem,1.8vw,1.35rem)}
+  .feat::before{content:"●"; color:var(--green); position:absolute; left:0; font-size:.7em; top:.35em}
+  .feat span{display:block; color:var(--muted); font-size:.82em; margin-top:.2rem}
+  .pills{display:flex; gap:.6rem; flex-wrap:wrap; margin-top:2rem}
+  .pill{font-family:var(--mono); font-size:.75rem; color:var(--muted); border:1px solid var(--line); background:var(--panel); border-radius:999px; padding:.4rem .9rem}
+  .pill .ok{color:var(--green)}
+  .cta{font-family:var(--mono); color:var(--muted); margin-top:2rem; font-size:clamp(.9rem,1.7vw,1.2rem)}
+  .cta b{color:var(--green)}
+  /* chrome */
+  .counter{position:fixed; bottom:1.4rem; right:1.8rem; font-family:var(--mono); font-size:.8rem; color:var(--muted); z-index:5}
+  .counter b{color:var(--green)}
+  .progress{position:fixed; top:0; left:0; height:3px; background:var(--green); z-index:5; transition:width .35s ease}
+  .hint{position:fixed; bottom:1.4rem; left:1.8rem; font-family:var(--mono); font-size:.72rem; color:var(--line); z-index:5}
+  .brand{position:fixed; top:1.3rem; left:1.8rem; font-family:var(--mono); font-size:.78rem; letter-spacing:.12em; color:var(--muted); z-index:5}
+  .brand b{color:var(--green)}
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="brand"><b>◢</b> CLEARVIEW</div>
+
+<div class="deck" id="deck">
+
+  <!-- 1: Title -->
+  <section class="slide active">
+    <div class="kicker">Single entry LLM gateway</div>
+    <h1>Clear<span class="accent">View</span></h1>
+    <p class="lead">Point your tools at ClearView once, and it routes across providers for you while showing spend in real time.</p>
+    <div class="pills">
+      <span class="pill"><span class="ok">✓</span> zero-config</span>
+      <span class="pill"><span class="ok">✓</span> self-hosted</span>
+      <span class="pill"><span class="ok">✓</span> multi-tenant</span>
+      <span class="pill"><span class="ok">✓</span> 275 tests</span>
+    </div>
+  </section>
+
+  <!-- 2: Problem -->
+  <section class="slide">
+    <h2>The problem</h2>
+    <ul>
+      <li>Teams pay flat subscriptions <span class="q">+</span> per-token across many providers</li>
+      <li>Devs &amp; agents pick models by <span class="q">habit</span>, not cost-fit — frontier called for trivial prompts</li>
+      <li>The subsidised-pricing era is ending. Cost discipline is now a competitive edge</li>
+      <li><span class="q">No unified view</span> of spend, token burn, or latency</li>
+    </ul>
+    <p class="lead">“We don’t know how much we’d save if we just used Haiku for renames.”</p>
+  </section>
+
+  <!-- 3: Solution -->
+  <section class="slide">
+    <h2>The solution</h2>
+    <p class="lead" style="margin-top:0">One drop-in proxy. Point your base URL at it and stop overpaying — zero client code changes.</p>
+    <div class="code">export OPENAI_BASE_URL=http://localhost:8000/v1</div>
+    <div class="flow">
+      <span class="node">Client<br>Cursor / SDK / curl</span>
+      <span class="arrow">▶</span>
+      <span class="node hot">Rules → Classifier → Pick tier</span>
+      <span class="arrow">▶</span>
+      <span class="node">cheap · mid · frontier</span>
+    </div>
+  </section>
+
+  <!-- 4: Numbers -->
+  <section class="slide">
+    <h2>Live numbers</h2>
+    <div class="kpis">
+      <div class="kpi"><div class="v green">100%</div><div class="l">Routing accuracy (eval)</div></div>
+      <div class="kpi"><div class="v amber">40–85%</div><div class="l">Typical cost cut</div></div>
+      <div class="kpi"><div class="v">&lt;100ms</div><div class="l">Routing overhead p95</div></div>
+      <div class="kpi"><div class="v pink">$0</div><div class="l">Native cost (sub mode)</div></div>
+    </div>
+    <p class="lead">Per-call accounting: native vs plan-equivalent cost, drift % savings, latency, cache hits — one SQLite row per call, sub-second aggregates.</p>
+  </section>
+
+  <!-- 5: Beyond routing -->
+  <section class="slide">
+    <h2>More than a router</h2>
+    <div class="grid2">
+      <div class="feat">Trading-floor dashboard<span>Live cost ticker — tape, burn rate, candles, leaderboard</span></div>
+      <div class="feat">Per-team quotas<span>Daily/monthly USD caps, allowed-tier gates, full attribution</span></div>
+      <div class="feat">A/B shadow routing<span>Serve one tier, silently test another — paired cost diff</span></div>
+      <div class="feat">Self-tuning loop<span>Shadow → LLM-judge → feedback → auto-tune policy</span></div>
+      <div class="feat">Zero-config setup<span>Built-in mock provider + setup doctor — runs with nothing</span></div>
+      <div class="feat">CI eval gate<span>Routing-accuracy &amp; cost regression fail the build</span></div>
+    </div>
+  </section>
+
+  <!-- 6: Close -->
+  <section class="slide">
+    <div class="kicker">Try it</div>
+    <h1>Point your IDE <span class="accent">here.</span></h1>
+    <div class="code">export OPENAI_BASE_URL=http://localhost:8000/v1<br>open http://localhost:8000/admin/explorer</div>
+    <p class="cta">Goal: <b>30%+ verified savings</b> on dev workload — zero developer friction.</p>
+    <p class="cta mono">github.com/brezneyviegas/ClearView</p>
+  </section>
+
+</div>
+
+<div class="counter"><b id="cur">1</b> / <span id="total">6</span></div>
+<div class="hint">← → / space to navigate</div>
+
+<script>
+  const slides = [...document.querySelectorAll('.slide')];
+  const total = slides.length;
+  let i = 0;
+  document.getElementById('total').textContent = total;
+  const cur = document.getElementById('cur');
+  const progress = document.getElementById('progress');
+
+  function show(n){
+    i = Math.max(0, Math.min(total - 1, n));
+    slides.forEach((s, idx) => s.classList.toggle('active', idx === i));
+    cur.textContent = i + 1;
+    progress.style.width = ((i + 1) / total * 100) + '%';
+  }
+  function next(){ show(i + 1); }
+  function prev(){ show(i - 1); }
+
+  document.addEventListener('keydown', e => {
+    if (['ArrowRight',' ','PageDown'].includes(e.key)){ e.preventDefault(); next(); }
+    else if (['ArrowLeft','PageUp'].includes(e.key)){ e.preventDefault(); prev(); }
+    else if (e.key === 'Home'){ show(0); }
+    else if (e.key === 'End'){ show(total - 1); }
+  });
+  // click right half = next, left half = prev
+  document.getElementById('deck').addEventListener('click', e => {
+    (e.clientX > window.innerWidth / 2 ? next : prev)();
+  });
+  show(0);
+</script>
+</body>
+</html>

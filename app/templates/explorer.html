@@ -280,6 +280,14 @@
   #rq-rules td.num, #rq-rules th.num { text-align: right; font-family: var(--mono); }
   .rq-bar { height: 6px; background: var(--accent); border-radius: 3px; min-width: 2px; }
   @media (max-width: 720px) { .rq-cards { grid-template-columns: repeat(2, 1fr); } }
+  .pl-bucket { padding: 12px 18px; border-top: 1px solid var(--line); }
+  .pl-bucket-name { font-family: var(--mono); font-size: 11px; color: var(--muted); letter-spacing: .04em; margin-bottom: 8px; }
+  .pl-row { display: grid; grid-template-columns: 110px 1fr 250px; align-items: center; gap: 10px; padding: 3px 0; font-size: 12px; }
+  .pl-prov { font-family: var(--mono); }
+  .pl-prov.win { color: var(--accent); }
+  .pl-track { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+  .pl-fill { height: 100%; background: var(--accent); border-radius: 4px; }
+  .pl-num { font-family: var(--mono); text-align: right; color: var(--muted); font-size: 11px; }
   .sc-model { color: var(--text); font-weight: 600; }
   .sc-cost  { color: var(--muted); margin-left: 6px; }
   .sc-diff-pos { color: var(--pink); }
@@ -597,6 +605,13 @@
     </div>
   </div>
 
+  <div class="panel" id="provider-learning-panel">
+    <h2><span>&#129518; PROVIDER LEARNING</span><span class="h2-meta" id="pl-meta">which provider wins per prompt bucket</span></h2>
+    <div id="provider-learning-container">
+      <div class="sc-empty">no provider-shadow data yet — set CLEARVIEW_PROVIDER_SHADOW=1 + judge on</div>
+    </div>
+  </div>
+
   <div class="panel" id="shadow-compare-panel">
     <h2><span>&#128253; A/B SHADOW COMPARE</span><span class="h2-meta" id="shadow-compare-meta">primary vs shadow · last 50 pairs</span></h2>
     <div id="shadow-compare-container">
@@ -713,6 +728,7 @@
 	  let lastDetailRows = [];        // ordered last calls_detail rows (for trade tape, last 20 per model)
 	  let shadowCompareEnabled = true;
 	  let routingQualityEnabled = true;
+	  let providerLearningEnabled = true;
 	  let bellEnabled = false;
 	  let audioCtx = null;
   // Drill-down panel state. selectedSymbol == null when closed.
@@ -1236,6 +1252,62 @@
     wrap.innerHTML = html;
   }
 
+  async function fetchProviderLearning() {
+    if (!providerLearningEnabled) return null;
+    try {
+      const res = await fetch("/admin/provider_scores");
+      if (res.status === 401 || res.status === 403) {
+        providerLearningEnabled = false;
+        const p = document.getElementById("provider-learning-panel");
+        if (p) p.style.display = "none";
+        return null;
+      }
+      return res.ok ? await res.json() : null;
+    } catch (e) { console.warn("provider_scores fetch failed", e); return null; }
+  }
+
+  function renderProviderLearning(payload) {
+    if (!payload) return;
+    const wrap = document.getElementById("provider-learning-container");
+    const meta = document.getElementById("pl-meta");
+    if (!wrap) return;
+    const buckets = payload.buckets || {};
+    const names = Object.keys(buckets);
+    const minN = payload.min_n ?? 8;
+    const useComposite = !!payload.scoring_enabled;
+    const modeLbl = useComposite ? "composite ON" : (payload.learning_enabled ? "win-rate ON" : "collecting");
+    if (meta) meta.textContent = modeLbl + " · min " + minN + " samples · " + names.length + " buckets";
+    if (names.length === 0) {
+      wrap.innerHTML = '<div class="sc-empty">no provider data yet — set CLEARVIEW_PROVIDER_SHADOW=1 + judge on</div>';
+      return;
+    }
+    let html = "";
+    for (const b of names) {
+      const provs = buckets[b] || [];
+      // value driving the bar: composite multiplier (0-1 → %) if present, else win-rate
+      const valOf = p => (p.composite != null ? p.composite * 100 : p.win_rate_pct);
+      const top = provs.length ? valOf(provs[0]) : 0;
+      html += '<div class="pl-bucket"><div class="pl-bucket-name">' + escapeHTML(b) + '</div>';
+      for (const p of provs) {
+        const v = valOf(p);
+        const isWin = v === top && (p.n >= minN);
+        let detail = p.win_rate_pct + '% win';
+        if (p.composite != null) {
+          const bd = p.score_breakdown || {};
+          detail = '×' + p.composite.toFixed(2)
+            + ' (q' + (bd.quality ?? 0) + ' $' + (bd.cost ?? 0)
+            + ' l' + (bd.latency ?? 0) + ' b' + (bd.burn ?? 0) + ')';
+        }
+        html += '<div class="pl-row">'
+          + '<span class="pl-prov' + (isWin ? ' win' : '') + '">' + escapeHTML(p.provider) + '</span>'
+          + '<span class="pl-track"><span class="pl-fill" style="width:' + v.toFixed(0) + '%"></span></span>'
+          + '<span class="pl-num">' + detail + ' · n=' + p.n + '</span></div>';
+      }
+      html += '</div>';
+    }
+    wrap.innerHTML = html;
+  }
+
   function fmtSignedMoney(v) {
     const n = Number(v || 0);
     const abs = Math.abs(n);
@@ -1319,13 +1391,14 @@
 
   async function pollOnce() {
     try {
-      const [statsR, tsR, detailR, tickerR, shadowR, rqR] = await Promise.all([
+      const [statsR, tsR, detailR, tickerR, shadowR, rqR, plR] = await Promise.all([
         fetch("/admin/stats" + qs).then(r => r.json()),
         fetch("/admin/timeseries" + (qs ? qs + "&window=60" : "?window=60")).then(r => r.json()),
         fetch("/admin/calls_detail" + qs).then(r => r.json()),
         fetchTicker(),
         fetchShadowCompare(),
         fetchRoutingQuality(),
+        fetchProviderLearning(),
       ]);
       renderKpis(statsR.kpis);
       renderSessions(statsR.sessions);
@@ -1347,6 +1420,7 @@
       }
       if (shadowCompareEnabled) renderShadowCompare(shadowR);
       if (routingQualityEnabled) renderRoutingQuality(rqR);
+      if (providerLearningEnabled) renderProviderLearning(plR);
       if (selectedSymbol) renderTickerDetail();
       markRefreshed();
     } catch (e) {

@@ -1,8 +1,11 @@
 # ClearView
 
-LLM cost-router middleware. ClearView sits between clients and providers, routes
-each prompt to the cheapest capable model, and records tokens, cost, latency,
-savings, cache hits, and routing decisions.
+ClearView is a single entry LLM gateway. Point your tools at ClearView once,
+and it routes across providers for you.
+
+ClearView sits between clients and providers, routes each prompt to the cheapest
+capable model, and records tokens, cost, latency, savings, cache hits, and
+routing decisions.
 
 It exposes OpenAI-compatible APIs, compatibility shims for Anthropic/Gemini
 clients, an operator dashboard, and a lightweight chat UI for teams.
@@ -45,6 +48,10 @@ Open:
 - Cost explorer: `http://localhost:8000/admin/explorer`
 - Health: `http://localhost:8000/health`
 
+VS Code users can run `ClearView: bootstrap dev env`, then
+`ClearView: run gateway` from the command palette. See
+[`Docs/IDE_SETUP.md`](Docs/IDE_SETUP.md) for VS Code and other IDE setup.
+
 Run tests:
 
 ```bash
@@ -55,29 +62,43 @@ python performance/route_overhead.py --iterations 1000
 
 ## Client Setup
 
-OpenAI-compatible clients:
+Use ClearView as your default OpenAI-compatible gateway:
 
 ```bash
 export OPENAI_BASE_URL=http://localhost:8000/v1
-export OPENAI_API_KEY=anything
+export OPENAI_API_KEY=clearview-local
+export OPENAI_MODEL=clearview-auto
 ```
+
+Then choose a ClearView virtual model:
+
+```text
+clearview-auto
+clearview-cheap
+clearview-mid
+clearview-frontier
+```
+
+Provider-specific client shims are also available for tools that require them.
 
 Claude Messages-style clients:
 
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:8000
-export ANTHROPIC_API_KEY=anything
+export ANTHROPIC_API_KEY=clearview-local
 ```
 
 Gemini generateContent-style clients:
 
 ```bash
 export GOOGLE_GEMINI_BASE_URL=http://localhost:8000
-export GEMINI_API_KEY=anything
+export GEMINI_API_KEY=clearview-local
 ```
 
 ClearView ignores the client-side dummy key for routing; real provider keys live
-in `.env`, unless you use one of the subscription CLI adapters.
+in `.env`, unless you use one of the subscription CLI adapters. Keep IDE client
+settings separate from `.env`; `clearview-client.env.example` is the template
+for tools that read environment variables.
 
 ## Main Features
 

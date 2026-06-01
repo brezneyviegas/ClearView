@@ -15,6 +15,26 @@ import pytest
 # DB isolation
 # ---------------------------------------------------------------------------
 
+# Provider/behaviour flags that a developer's local .env may set. litellm runs
+# load_dotenv() on import, so .env leaks into the test process — clear these so
+# the suite is hermetic regardless of the machine's .env (e.g. a live server
+# running with CLEARVIEW_USE_CLAUDE_CLI=1). Individual tests still set them via
+# monkeypatch.setenv, which runs after this fixture and wins.
+_AMBIENT_FLAGS = (
+    "CLEARVIEW_USE_CLAUDE_CLI", "CLEARVIEW_USE_CODEX_CLI", "CLEARVIEW_USE_GEMINI_CLI",
+    "CLEARVIEW_USE_MOCK", "CLEARVIEW_MOCK_ON_FAILURE",
+    "CLEARVIEW_AUTO_SHADOW", "CLEARVIEW_AUTO_SHADOW_JUDGE", "CLEARVIEW_EMBED_CLASSIFIER",
+    "CLEARVIEW_CLIENT_KEYS", "CLEARVIEW_PROVIDER_LEARNING", "CLEARVIEW_PROVIDER_SHADOW",
+    "CLEARVIEW_PROVIDER_SCORING",
+)
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_flags(monkeypatch):
+    for k in _AMBIENT_FLAGS:
+        monkeypatch.delenv(k, raising=False)
+
+
 @pytest.fixture(autouse=True)
 def tmp_db(tmp_path, monkeypatch):
     """Point CLEARVIEW_DB_PATH at a per-test sqlite file and re-init the schema.

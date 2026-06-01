@@ -1,7 +1,7 @@
 [project]
 name = "clearview"
 version = "0.1.0"
-description = "LLM cost-router middleware. Routes prompts to cheapest capable model."
+description = "Single entry LLM gateway that routes prompts across providers."
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",

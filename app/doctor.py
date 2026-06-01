@@ -164,6 +164,83 @@ def write_tailored(out_path: str | None = None, policy_path: str | None = None) 
             "report": report}
 
 
+# --- IDE / client config generation ---------------------------------------
+
+_BASE_URL_OPENAI = "http://localhost:8000/v1"
+_BASE_URL_ROOT = "http://localhost:8000"
+_DEFAULT_MODEL = "clearview-auto"
+
+IDE_TOOLS = ("openai", "continue", "cline", "cursor", "aider", "anthropic", "gemini")
+
+
+def _client_key() -> str:
+    """The key a client should present. If the gateway is locked
+    (CLEARVIEW_CLIENT_KEYS), use the first allowed key; else the dummy."""
+    raw = os.environ.get("CLEARVIEW_CLIENT_KEYS", "").strip()
+    if raw:
+        first = raw.split(",")[0].strip()
+        if first:
+            return first
+    return "clearview-local"
+
+
+def ide_config(tool: str) -> str:
+    """Return a ready-to-paste config snippet for a given IDE / client tool."""
+    tool = (tool or "openai").lower()
+    key = _client_key()
+
+    if tool == "openai":
+        return (f"export OPENAI_BASE_URL={_BASE_URL_OPENAI}\n"
+                f"export OPENAI_API_KEY={key}\n"
+                f"export OPENAI_MODEL={_DEFAULT_MODEL}")
+
+    if tool == "continue":  # ~/.continue/config.yaml (modern Continue format)
+        return (
+            "# ~/.continue/config.yaml — add under `models:`\n"
+            "models:\n"
+            "  - name: ClearView (auto)\n"
+            "    provider: openai\n"
+            f"    apiBase: {_BASE_URL_OPENAI}\n"
+            f"    apiKey: {key}\n"
+            f"    model: {_DEFAULT_MODEL}\n"
+            "    roles: [chat, edit, apply]")
+
+    if tool == "cline":  # VS Code Cline — OpenAI Compatible provider
+        return json.dumps({
+            "apiProvider": "openai",
+            "openAiBaseUrl": _BASE_URL_OPENAI,
+            "openAiApiKey": key,
+            "openAiModelId": _DEFAULT_MODEL,
+        }, indent=2)
+
+    if tool == "cursor":  # Cursor → Settings → Models → OpenAI override
+        return (
+            "Cursor → Settings → Models → 'Override OpenAI Base URL':\n"
+            f"  Base URL:  {_BASE_URL_OPENAI}\n"
+            f"  API Key:   {key}\n"
+            f"  Model:     add a custom model named '{_DEFAULT_MODEL}'\n"
+            "Note: Cursor's cloud features may bypass a localhost base URL; "
+            "local/custom-model mode works.")
+
+    if tool == "aider":  # aider uses OpenAI-compatible env
+        return (
+            f"export OPENAI_API_BASE={_BASE_URL_OPENAI}\n"
+            f"export OPENAI_API_KEY={key}\n"
+            f"aider --model openai/{_DEFAULT_MODEL}")
+
+    if tool == "anthropic":  # tools hardcoded to the Anthropic protocol
+        return (f"export ANTHROPIC_BASE_URL={_BASE_URL_ROOT}\n"
+                f"export ANTHROPIC_API_KEY={key}\n"
+                f"export ANTHROPIC_MODEL={_DEFAULT_MODEL}")
+
+    if tool == "gemini":  # tools hardcoded to the Gemini protocol
+        return (f"export GOOGLE_GEMINI_BASE_URL={_BASE_URL_ROOT}\n"
+                f"export GEMINI_API_KEY={key}\n"
+                f"export GEMINI_MODEL={_DEFAULT_MODEL}")
+
+    raise ValueError(f"unknown tool '{tool}'. Known: {', '.join(IDE_TOOLS)}")
+
+
 def _format_report(report: dict) -> str:
     lines = ["ClearView setup doctor", "=" * 40, "", "Providers:"]
     for name, p in report["providers"].items():
@@ -192,7 +269,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--write", action="store_true",
                     help="write a tailored policy.yaml (backs up the target first)")
     ap.add_argument("--out", default=None, help="output path for --write")
+    ap.add_argument("--ide", default=None, metavar="TOOL",
+                    help=f"print client config for an IDE/tool ({', '.join(IDE_TOOLS)})")
     args = ap.parse_args(argv)
+
+    if args.ide:
+        try:
+            snippet = ide_config(args.ide)
+        except ValueError as e:
+            print(str(e)); return 2
+        print(snippet)
+        print("\n# Routing visibility: every response carries headers\n"
+              "#   x-clearview-tier   (cheap|mid|frontier)\n"
+              "#   x-clearview-model  (the model that actually served it)\n"
+              "#   x-clearview-request-id\n"
+              "# Watch live routing at http://localhost:8000/admin/explorer")
+        return 0
 
     if args.write:
         result = write_tailored(out_path=args.out)

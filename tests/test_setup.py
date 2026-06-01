@@ -134,3 +134,64 @@ class TestDoctor:
         assert r.status_code == 200
         assert "providers" in r.json()
         assert r.json()["providers"]["mock"]["available"] is True
+
+
+# ---------------------------------------------------------------------------
+# IDE config generator
+# ---------------------------------------------------------------------------
+
+class TestIdeConfig:
+    def test_openai_env(self):
+        out = doctor.ide_config("openai")
+        assert "OPENAI_BASE_URL=http://localhost:8000/v1" in out
+        assert "clearview-auto" in out
+
+    def test_continue_is_valid_yaml(self):
+        out = doctor.ide_config("continue")
+        body = "\n".join(l for l in out.splitlines() if not l.strip().startswith("#"))
+        cfg = yaml.safe_load(body)
+        m = cfg["models"][0]
+        assert m["provider"] == "openai"
+        assert m["apiBase"] == "http://localhost:8000/v1"
+        assert m["model"] == "clearview-auto"
+
+    def test_cline_is_valid_json(self):
+        import json
+        d = json.loads(doctor.ide_config("cline"))
+        assert d["openAiBaseUrl"] == "http://localhost:8000/v1"
+        assert d["openAiModelId"] == "clearview-auto"
+
+    def test_unknown_tool_raises(self):
+        with pytest.raises(ValueError):
+            doctor.ide_config("notarealide")
+
+    def test_uses_client_key_when_locked(self, monkeypatch):
+        monkeypatch.setenv("CLEARVIEW_CLIENT_KEYS", "team-key,alice")
+        assert "team-key" in doctor.ide_config("openai")
+        assert "clearview-local" not in doctor.ide_config("openai")
+
+
+# ---------------------------------------------------------------------------
+# Optional client-key gate
+# ---------------------------------------------------------------------------
+
+class TestClientKeyGate:
+    BODY = {"model": "clearview-auto", "messages": [{"role": "user", "content": "hi"}]}
+
+    def test_open_by_default(self, client, monkeypatch):
+        monkeypatch.delenv("CLEARVIEW_CLIENT_KEYS", raising=False)
+        r = client.post("/v1/chat/completions", json=self.BODY)
+        assert r.status_code == 200
+
+    def test_locked_rejects_missing_and_wrong(self, client, monkeypatch):
+        monkeypatch.setenv("CLEARVIEW_CLIENT_KEYS", "secret-1,secret-2")
+        assert client.post("/v1/chat/completions", json=self.BODY).status_code == 401
+        r = client.post("/v1/chat/completions", json=self.BODY,
+                        headers={"Authorization": "Bearer wrong"})
+        assert r.status_code == 401
+
+    def test_locked_allows_listed_key(self, client, monkeypatch):
+        monkeypatch.setenv("CLEARVIEW_CLIENT_KEYS", "secret-1,secret-2")
+        r = client.post("/v1/chat/completions", json=self.BODY,
+                        headers={"Authorization": "Bearer secret-2"})
+        assert r.status_code == 200

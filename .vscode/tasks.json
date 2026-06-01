@@ -1,0 +1,63 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ClearView: bootstrap dev env",
+      "type": "shell",
+      "command": "python3 -m venv ${workspaceFolder}/.venv && ${workspaceFolder}/.venv/bin/python -m pip install -e \".[dev]\" && ([ -f ${workspaceFolder}/.env ] || cp ${workspaceFolder}/.env.example ${workspaceFolder}/.env)",
+      "problemMatcher": []
+    },
+    {
+      "label": "ClearView: run gateway",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m uvicorn app.main:app --env-file ${workspaceFolder}/.env --host 127.0.0.1 --port 8000 --reload",
+      "options": {
+        "env": {
+          "CLEARVIEW_POLICY_PATH": "${workspaceFolder}/policy.yaml",
+          "CLEARVIEW_DB_PATH": "${workspaceFolder}/clearview.db"
+        }
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "uvicorn",
+        "pattern": {
+          "regexp": "^(.+):(\\d+):(\\d+):\\s+(.*)$",
+          "file": 1,
+          "line": 2,
+          "column": 3,
+          "message": 4
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": "Uvicorn running on|Started reloader process",
+          "endsPattern": "Application startup complete"
+        }
+      }
+    },
+    {
+      "label": "ClearView: doctor",
+      "type": "shell",
+      "command": "set -a && [ -f ${workspaceFolder}/.env ] && . ${workspaceFolder}/.env; set +a; ${workspaceFolder}/.venv/bin/python -m app.doctor",
+      "problemMatcher": []
+    },
+    {
+      "label": "ClearView: test",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m pytest -q",
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "ClearView: lint",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python -m ruff check .",
+      "problemMatcher": []
+    },
+    {
+      "label": "ClearView: print IDE gateway config",
+      "type": "shell",
+      "command": "${workspaceFolder}/.venv/bin/python - <<'PY'\nprint('Base URL: http://localhost:8000/v1')\nprint('API key: clearview-local')\nprint('Model: clearview-auto')\nPY",
+      "problemMatcher": []
+    }
+  ]
+}

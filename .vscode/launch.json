@@ -1,0 +1,26 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "ClearView: debug gateway",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": [
+        "app.main:app",
+        "--env-file",
+        "${workspaceFolder}/.env",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--reload"
+      ],
+      "env": {
+        "CLEARVIEW_POLICY_PATH": "${workspaceFolder}/policy.yaml",
+        "CLEARVIEW_DB_PATH": "${workspaceFolder}/clearview.db"
+      },
+      "jinja": true
+    }
+  ]
+}

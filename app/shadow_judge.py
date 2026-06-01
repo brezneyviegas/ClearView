@@ -77,13 +77,11 @@ def judge(*, prompt: str, primary_text: str, shadow_text: str,
         candidate=shadow_text[:4000],
     )
     try:
-        resp = litellm.completion(
-            model=judge_model,
-            messages=[{"role": "user", "content": msg}],
-            max_tokens=4,
-            temperature=0,
-        )
-        out = resp["choices"][0]["message"]["content"].strip()
+        from . import llm_dispatch
+        resp = llm_dispatch.completion(
+            judge_model, [{"role": "user", "content": msg}],
+            max_tokens=4, temperature=0)
+        out = (resp["choices"][0]["message"]["content"] or "").strip()
     except Exception:
         log.warning("shadow judge call failed (model=%s)", judge_model, exc_info=True)
         return None

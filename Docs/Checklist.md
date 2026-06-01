@@ -9,6 +9,81 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
 
 ## Priority queue
 
+- [x] **12. Quality-learned provider selection** (route to the right *provider*,
+  not just the right tier — "sometimes Gemini, sometimes Codex").
+  - [x] **P1 foundation:** `provider_score` table `(bucket,provider)→wins/losses/ties/n`;
+        `telemetry.best_provider()` (cached); `router.bucket_for(tier,reason)`
+        (`tier:route_reason_family`); `_pick_model(tier,policy,bucket)` prefers the
+        learned-winner provider among *available* models in the tier, cold-start
+        safe. Env `CLEARVIEW_PROVIDER_LEARNING=1`, `CLEARVIEW_PROVIDER_MIN_N=8`.
+        Zero behavior change unless flag + data. 11 tests.
+  - [x] **P2 capture:** provider-level auto-shadow — shadow an alternate available
+        provider in the SAME tier, LLM-judge winner, tally both into
+        `provider_score[bucket]`. `CLEARVIEW_PROVIDER_SHADOW=1` (+ `_RATE`), needs
+        judge on. Extends `_run_shadow` (override + score_bucket). 3 tests + live
+        closed-loop verify (cold→gemini after 8 judged wins). 297 pass.
+  - [x] **P3 close the loop:** thumbs feedback attributed to the serving provider
+        feeds `provider_score` (up=win, down=loss); `/admin/provider_scores`
+        endpoint (grouped by bucket) + explorer **PROVIDER LEARNING** panel with
+        per-bucket win-rate bars. 4 tests. 301 pass.
+
+- [x] **11. IDE / client onboarding flow.** (verified end-to-end live)
+  - [x] OpenAI-compatible entry point + dummy client key accepted; `clearview-auto`
+        routes via rules/classifier to a real configured LLM (non-stream + stream).
+  - [x] Per-extension config generator: `python -m app.doctor --ide
+        <continue|cline|cursor|aider|openai|anthropic|gemini>` emits paste-ready
+        snippets (Continue YAML + Cline JSON validated by tests).
+  - [x] Routing visibility: `x-clearview-tier|model|request-id` headers on all
+        chat responses; documented in `Docs/IDE_SETUP.md`.
+  - [x] Optional gateway lock: `CLEARVIEW_CLIENT_KEYS` allow-list (`_client_key_allowed`);
+        `cv_team_*` bearers + `/chat` cookies always allowed; unset = open dev.
+  - [x] 8 tests (IDE config + client-key gate) in `tests/test_setup.py`. 283 pass.
+  - Manual GUI step (install Continue/Cline and click) left to the user; the exact
+    request those extensions send is verified live against the gateway.
+
+- [x] **13. "Stock-market" composite provider scoring.**
+  - [x] `provider_score` now accumulates `sum_cost/sum_latency_ms/sum_tokens_out`
+        alongside wins/ties (self-contained — fixes the broken calls-table join
+        where shadow rows carried a different route_reason).
+  - [x] `app/scoring.py`: per-bucket composite multiplier = weighted blend of
+        normalized quality + cost + latency + burn (each min-max'd across the
+        bucket's providers, lower-is-better inverted). Env weights
+        `CLEARVIEW_SCORE_W_{QUALITY,COST,LATENCY,BURN}` (default .5/.25/.15/.10).
+  - [x] Router `_select_from`: composite (if `CLEARVIEW_PROVIDER_SCORING=1`) →
+        win-rate → first-listed. Shadow + feedback both feed metrics.
+  - [x] `/admin/provider_scores` returns composite + normalized breakdown;
+        explorer PROVIDER LEARNING panel shows the ×multiplier + q/$/l/b.
+  - [x] 10 tests (`tests/test_scoring.py`). 311 pass. Verified on real telemetry.
+  - Carried-over fix still open: rotate `_provider_shadow_alt` through ALL
+    alternates (Gemini still never sampled in a 3-provider tier).
+  - Evolve provider learning beyond win/loss into a **total score per provider
+    per bucket** blending: quality (judge win-rate), **cost** (native/synth $),
+    **latency** (ms), and **token burn** (tokens per useful answer).
+  - Combine into a single weighted score → a **multiplier** that ranks providers;
+    the multiplier defines the route path (like a ticker pick). Tunable weights
+    (`CLEARVIEW_SCORE_W_QUALITY/COST/LATENCY/BURN`).
+  - Data already captured per call in telemetry (`native_cost_usd`,
+    `synth_cost_usd`, `latency_ms`, `tokens_in/out`) + `provider_score`
+    (quality). Need: aggregate per (bucket, provider) → normalized sub-scores →
+    weighted total → feed `_pick_model`/`best_provider`.
+  - Surface in explorer PROVIDER LEARNING panel: per-provider score breakdown
+    (quality/cost/latency/burn) + the composite multiplier.
+  - Prereq fix carried over: rotate `_provider_shadow_alt` through ALL alternate
+    providers (today only the first non-served one — Gemini never sampled in a
+    3-provider tier).
+
+- [ ] **10. Widen classifier reach — narrow `medium_prompt` catch-all.**
+  - Today `medium_prompt` (`tokens_lt: 1500 → cheap`) intercepts almost every
+    short prompt before the classifier runs, so the Haiku classifier only fires
+    in the 1500–4000-token window. Result: most routing is rule-driven, the
+    classifier rarely decides.
+  - Goal: let the classifier drive more decisions. Options: drop/raise the
+    `medium_prompt` floor, or gate it to obviously-trivial prompts only, or move
+    the classifier ahead of it for mid-length prompts.
+  - Must re-run `eval/run_eval.py --gate` after — narrowing changes routing
+    accuracy + cost; keep the gate green.
+  - Files: `policy.yaml` (rule), `eval/fixtures.json` / `eval/gate.json`.
+
 - [x] **9. Adapt to user's setup (zero-config) + setup doctor.**
   - [x] Built-in mock/echo provider (`app/providers/mock.py`): canned $0
         responses, always callable, no keys/CLI/ollama. `CLEARVIEW_USE_MOCK=1`

@@ -101,6 +101,22 @@ def _flatten_prompt(messages: list[dict[str, Any]]) -> str:
     return "\n".join(parts)
 
 
+def _last_user_text(messages: list[dict[str, Any]]) -> str:
+    """The latest user turn, used as the ROUTING signal. IDE clients (Continue,
+    Cline, …) bolt a large system prompt + repo context onto every request; a
+    trivial question shouldn't route to frontier just because of that bulk.
+    Complexity is judged on what the user actually asked. Falls back to the
+    flattened prompt when there's no user message."""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content", "")
+            if isinstance(c, list):
+                c = " ".join(p.get("text", "") for p in c if isinstance(p, dict))
+            if isinstance(c, str) and c.strip():
+                return c
+    return _flatten_prompt(messages)
+
+
 def _next_tier(tier: str) -> str | None:
     try:
         idx = _TIER_ORDER.index(tier)
@@ -270,6 +286,30 @@ def _admin_auth(request: Request) -> None:
         raise HTTPException(status_code=401, detail="invalid admin token")
 
 
+def _client_key_allowed(request: Request) -> None:
+    """Optional gateway lock for IDE/client traffic. When CLEARVIEW_CLIENT_KEYS
+    is set (comma-separated), a request must present either a cv_team_ bearer
+    OR a bearer in that allow-list — otherwise 401. Unset = open (local dev).
+
+    Lets a user run ClearView on a shared network with a shared dummy key
+    (e.g. the `clearview-local` they paste into VS Code) without exposing it.
+    """
+    raw = os.environ.get("CLEARVIEW_CLIENT_KEYS", "").strip()
+    if not raw:
+        return  # open by default
+    allowed = {k.strip() for k in raw.split(",") if k.strip()}
+    auth = request.headers.get("authorization", "")
+    cand = auth.split(" ", 1)[1].strip() if auth.lower().startswith("bearer ") else ""
+    if cand.startswith("cv_team_"):
+        return  # team tokens validated separately in _resolve_team
+    cookie = request.cookies.get("cv_session", "")
+    if cookie.startswith("cv_team_"):
+        return  # /chat UI logs in via cookie, not a client key
+    if cand in allowed:
+        return
+    raise HTTPException(status_code=401, detail="invalid or missing client key")
+
+
 def _resolve_team(request: Request) -> teams.Team | None:
     """Parse Authorization: Bearer cv_team_<hex> and return the matching Team.
 
@@ -331,6 +371,8 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
     if not messages:
         raise HTTPException(status_code=400, detail="messages required")
 
+    # Optional gateway lock for client/IDE traffic (no-op unless CLEARVIEW_CLIENT_KEYS set).
+    _client_key_allowed(request)
     # Team identity (Bearer cv_team_*). None = anonymous (single-tenant fallback).
     team = _resolve_team(request)
     team_id = team.id if team else None
@@ -525,6 +567,8 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
             forced_tier = None
 
     prompt_text = _flatten_prompt(messages)
+    # Routing signal = the user's actual ask, not the IDE-injected context bulk.
+    route_text = _last_user_text(messages)
     if forced_tier:
         from .router import RouteDecision, _pick_model  # local import to keep main slim
         decision = RouteDecision(
@@ -542,11 +586,11 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
                 reason=f"direct_model:{requested}",
             )
         else:
-            decision = route(prompt_text, pol, header_tier=header_tier)
+            decision = route(route_text, pol, header_tier=header_tier)
     classifier_tier: str | None = None
     if os.environ.get("CLEARVIEW_ROUTING_QUALITY", "1") != "0":
         try:
-            classifier_tier = would_have_tier(prompt_text, pol)
+            classifier_tier = would_have_tier(route_text, pol)
         except Exception as e:  # noqa: BLE001
             log.warning("routing quality classifier failed: %s", e)
 
@@ -686,7 +730,9 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
         and used_tier != "frontier"
         and not forced_tier
         and not _is_empty_response(resp)
-        and _looks_refusal_or_too_short(resp, prompt_text)
+        # Judge "too short" against the user's actual ask, not the IDE context
+        # bulk — a 1-word answer to a 1-line question is fine.
+        and _looks_refusal_or_too_short(resp, route_text)
     ):
         nxt = _next_tier(used_tier)
         if nxt:
@@ -772,6 +818,31 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
             primary_text=_response_text(resp),
             team_id=team_id,
         ))
+    else:
+        # Provider-learning shadow (Phase 2): no tier-shadow firing → maybe
+        # shadow an alternate provider in the SAME tier and judge it, so the
+        # provider_score corpus learns which vendor wins per prompt bucket.
+        # Needs the judge on (otherwise there's no verdict to score).
+        alt = _provider_shadow_alt(used_tier, primary_model) if _shadow_judge_enabled() else None
+        if alt:
+            from .router import bucket_for
+            asyncio.create_task(_run_shadow(
+                shadow_tier=used_tier,
+                shadow_model_override=alt,
+                score_bucket=bucket_for(used_tier, decision.reason),
+                primary_provider=primary_model.split("/", 1)[0] if "/" in primary_model else "unknown",
+                primary_request_id=primary_request_id,
+                primary_model=primary_model,
+                primary_tier=used_tier,
+                messages=messages,
+                body=body,
+                session_id=session_id,
+                client_id=client_id,
+                requested=requested,
+                prompt_text=prompt_text,
+                primary_text=_response_text(resp),
+                team_id=team_id,
+            ))
 
     return response
 
@@ -1346,16 +1417,25 @@ async def _run_shadow(*, shadow_tier: str, primary_request_id: str | None,
                       primary_model: str, messages: list[dict[str, Any]], body: dict,
                       session_id: str, client_id: str | None, requested: str,
                       prompt_text: str, team_id: str | None = None,
-                      primary_tier: str | None = None, primary_text: str = "") -> None:
+                      primary_tier: str | None = None, primary_text: str = "",
+                      shadow_model_override: str | None = None,
+                      score_bucket: str | None = None,
+                      primary_provider: str | None = None) -> None:
     """Fire a shadow upstream call for offline cost+quality comparison.
 
     Runs after the client already has the primary response. Errors are swallowed
     and logged as a failure record so they don't disrupt the primary path.
+
+    Provider-learning (Phase 2): when `shadow_model_override` is set the shadow
+    runs a specific alternate model (same tier, different provider) and, after
+    the judge verdict, `score_bucket`+`primary_provider` drive a
+    provider_score win/loss tally so `clearview-auto` can learn which provider
+    wins for which kind of prompt.
     """
     pol = _policy()
     from .router import _pick_model  # local import to keep module slim
     try:
-        shadow_model = _pick_model(shadow_tier, pol)
+        shadow_model = shadow_model_override or _pick_model(shadow_tier, pol)
     except Exception as e:  # noqa: BLE001
         log.warning("shadow: _pick_model failed for tier %s: %s", shadow_tier, e)
         return
@@ -1460,6 +1540,30 @@ async def _run_shadow(*, shadow_tier: str, primary_request_id: str | None,
                 score=verdict["score"],
                 judge_model=_shadow_judge_model(),
             )
+            # Provider-learning tally (Phase 2): credit the win/loss to the two
+            # providers for this prompt bucket. winner 'shadow' = the alternate
+            # provider beat the served one for this kind of prompt.
+            if score_bucket and primary_provider:
+                shadow_provider = shadow_model.split("/", 1)[0]
+                w = verdict["winner"]
+                if w == "shadow":
+                    p_out, s_out = "loss", "win"
+                elif w == "primary":
+                    p_out, s_out = "win", "loss"
+                else:
+                    p_out = s_out = "tie"
+                # Shadow metrics computed above; primary metrics from its row.
+                pc = telemetry.get_call(primary_request_id) or {}
+                telemetry.record_provider_outcome(
+                    bucket=score_bucket, provider=primary_provider, tier=primary_tier,
+                    outcome=p_out,
+                    cost=float(pc.get("native_cost_usd") or 0.0) + float(pc.get("synth_cost_usd") or 0.0),
+                    latency_ms=float(pc.get("latency_ms") or 0.0),
+                    tokens_out=float(pc.get("tokens_out") or 0.0))
+                telemetry.record_provider_outcome(
+                    bucket=score_bucket, provider=shadow_provider, tier=primary_tier,
+                    outcome=s_out, cost=native + synth, latency_ms=latency_ms,
+                    tokens_out=tokens_out)
 
 
 def _mock_fallback_or_502(err, forward_kwargs, messages, session_id, client_id,
@@ -1528,6 +1632,29 @@ def _shadow_judge_enabled() -> bool:
     return os.environ.get("CLEARVIEW_AUTO_SHADOW_JUDGE", "0").strip() == "1"
 
 
+def _provider_shadow_alt(tier: str, used_model: str) -> str | None:
+    """Pick an alternate available model in the SAME tier with a different
+    provider, for provider-learning shadow (Phase 2). None when disabled, not
+    sampled, or no alternate provider is available. Mock is never an alternate.
+    """
+    if os.environ.get("CLEARVIEW_PROVIDER_SHADOW", "0").strip() != "1":
+        return None
+    try:
+        rate = float(os.environ.get("CLEARVIEW_PROVIDER_SHADOW_RATE", "1.0"))
+    except ValueError:
+        rate = 1.0
+    rate = max(0.0, min(1.0, rate))
+    if rate < 1.0 and random.random() >= rate:
+        return None
+    from .router import availability
+    served = used_model.split("/", 1)[0]
+    for m in availability().get(tier, []):
+        prov = m.split("/", 1)[0]
+        if prov != served and not mock_provider.is_available_model(m):
+            return m
+    return None
+
+
 def _shadow_judge_model() -> str:
     return (os.environ.get("CLEARVIEW_SHADOW_JUDGE_MODEL")
             or baseline_model_env() or _policy().baseline_model)
@@ -1553,6 +1680,21 @@ async def post_feedback(request: Request) -> JSONResponse:
         rating=int(rating),
         note=body.get("note"),
     )
+    # Phase 3: a thumbs rating is a direct quality signal for the provider that
+    # served it — feed it into the same provider_score corpus the shadow judge
+    # writes to (thumbs-up = win, thumbs-down = loss for that provider/bucket).
+    provider = row.get("picked_provider")
+    reason = row.get("route_reason")
+    tier = row.get("picked_tier")
+    if provider and reason and tier:
+        from .router import bucket_for
+        call = telemetry.get_call(row.get("request_id")) or {}
+        telemetry.record_provider_outcome(
+            bucket=bucket_for(tier, reason), provider=provider, tier=tier,
+            outcome="win" if row["rating"] > 0 else "loss",
+            cost=float(call.get("native_cost_usd") or 0.0) + float(call.get("synth_cost_usd") or 0.0),
+            latency_ms=float(call.get("latency_ms") or 0.0),
+            tokens_out=float(call.get("tokens_out") or 0.0))
     return JSONResponse({"ok": True, "feedback": row})
 
 
@@ -1563,6 +1705,41 @@ async def admin_stats(request: Request, session: str | None = None,
                       team: str | None = None) -> dict:
     _admin_auth(request)
     return telemetry.stats(session_id=session, team_id=team)
+
+
+@app.get("/admin/provider_scores")
+async def admin_provider_scores(request: Request, bucket: str | None = None) -> dict:
+    """Learned provider win-rates per prompt bucket (provider-learning corpus).
+    Grouped by bucket so the explorer can show which provider wins where."""
+    _admin_auth(request)
+    from . import scoring
+    rows = telemetry.provider_scores(bucket=bucket)
+    by_bucket: dict[str, list] = {}
+    for r in rows:
+        n = int(r["n"] or 0)
+        wr = ((int(r["wins"] or 0) + 0.5 * int(r["ties"] or 0)) / n) if n else 0.0
+        by_bucket.setdefault(r["bucket"], []).append({
+            "provider": r["provider"], "tier": r["tier"], "n": n,
+            "wins": r["wins"], "losses": r["losses"], "ties": r["ties"],
+            "win_rate_pct": round(wr * 100.0, 1),
+        })
+    # Composite "stock-market" multiplier + normalized sub-scores per provider.
+    for b, provs in by_bucket.items():
+        comp = scoring.composite_scores(b)
+        for p in provs:
+            cs = comp.get(p["provider"])
+            if cs:
+                p["composite"] = cs["score"]
+                p["score_breakdown"] = {k: cs[k] for k in ("quality", "cost", "latency", "burn")}
+        # Rank by composite when present, else win-rate.
+        provs.sort(key=lambda x: x.get("composite", x["win_rate_pct"] / 100.0), reverse=True)
+    return {
+        "learning_enabled": os.environ.get("CLEARVIEW_PROVIDER_LEARNING", "0") == "1",
+        "scoring_enabled": scoring.enabled(),
+        "weights": scoring.weights(),
+        "min_n": int(os.environ.get("CLEARVIEW_PROVIDER_MIN_N", "8") or 8),
+        "buckets": by_bucket,
+    }
 
 
 @app.get("/admin/feedback")

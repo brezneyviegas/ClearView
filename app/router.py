@@ -9,7 +9,7 @@ from typing import Any
 
 import litellm
 
-from . import embed_classifier
+from . import embed_classifier, telemetry
 from .providers import mock as _mock
 from .config import Policy
 
@@ -162,8 +162,73 @@ def _eval_rule(cond: dict[str, Any], prompt: str, header_tier: str | None) -> bo
     return True
 
 
-def _pick_model(tier: str, policy: Policy) -> str:
-    """Pick first available model in tier; if none, escalate up tier ladder."""
+# --- quality-learned provider selection (Phase 1) --------------------------
+
+def _provider_learning_enabled() -> bool:
+    return os.environ.get("CLEARVIEW_PROVIDER_LEARNING", "0").strip() == "1"
+
+
+def _provider_min_n() -> int:
+    try:
+        return max(1, int(os.environ.get("CLEARVIEW_PROVIDER_MIN_N", "8")))
+    except ValueError:
+        return 8
+
+
+def _route_reason_family(reason: str) -> str:
+    """Coarse, stable bucket key from a route reason. Keeps the rule name
+    (rules differ a lot) but collapses classifier score/confidence noise."""
+    head = (reason or "").split(";", 1)[0]
+    if head.startswith("rule:"):
+        return head                      # e.g. "rule:stack_trace"
+    return head.split(":", 1)[0] or "default"   # "classifier" / "embed_classifier" / "default"
+
+
+def bucket_for(tier: str, reason: str) -> str:
+    return f"{tier}:{_route_reason_family(reason)}"
+
+
+def _select_from(models: list[str], bucket: str | None) -> str:
+    """Among an ordered list of available models, prefer the best provider for
+    this bucket. Ranking order:
+      1. composite "stock-market" score (quality+cost+latency+burn) if enabled
+      2. else judge win-rate (provider learning) if enabled
+      3. else the policy's first-listed model (cold start / off).
+    Never changes WHICH tier is used."""
+    from . import scoring  # local import to avoid import-time cost
+    if not bucket or not (_provider_learning_enabled() or scoring.enabled()):
+        return models[0]
+
+    seen: set[str] = set()
+    candidates: list[str] = []
+    for m in models:
+        p = m.split("/", 1)[0]
+        if p not in seen:
+            seen.add(p)
+            candidates.append(p)
+
+    best = None
+    try:
+        if scoring.enabled():
+            best = scoring.best_by_composite(bucket, candidates, _provider_min_n())
+        if best is None and _provider_learning_enabled():
+            best = telemetry.best_provider(bucket, candidates, _provider_min_n())
+    except Exception as e:  # noqa: BLE001 — never let scoring break routing
+        log.warning("provider scoring lookup failed: %s", e)
+        best = None
+
+    if best:
+        for m in models:
+            if m.split("/", 1)[0] == best:
+                return m
+    return models[0]
+
+
+def _pick_model(tier: str, policy: Policy, bucket: str | None = None) -> str:
+    """Pick a model in tier; if none, escalate up then down the ladder.
+
+    With provider learning on and enough data for `bucket`, prefers the
+    best-win-rate available provider within the chosen tier (cold-start safe)."""
     # Explicit mock mode: route everything to the built-in mock (offline demo).
     if _mock.is_enabled():
         return _mock.MODEL
@@ -196,7 +261,7 @@ def _pick_model(tier: str, policy: Policy) -> str:
                     "tier %s has no available models (missing provider keys); escalating to %s",
                     tier, t,
                 )
-            return models[0]
+            return _select_from(models, bucket)
 
     # 2) Nothing upward — drop DOWN to any cheaper tier that IS available.
     for idx in range(start_idx - 1, -1, -1):
@@ -204,12 +269,12 @@ def _pick_model(tier: str, policy: Policy) -> str:
         models = avail.get(t) or []
         if models:
             log.warning("tier %s unavailable; falling back DOWN to %s", tier, t)
-            return models[0]
+            return _select_from(models, bucket)
 
     # 3) Also scan any non-ladder tiers the operator may have declared.
     for t, models in avail.items():
         if t not in _TIER_ORDER and models:
-            return models[0]
+            return _select_from(models, bucket)
 
     # 4) Nothing reachable anywhere — use the built-in mock provider so the app
     #    still serves (zero-setup). It needs no keys/CLI/ollama.
@@ -251,13 +316,11 @@ def _classify(prompt: str, policy: Policy) -> ClassifierDecision:
     cls = policy.classifier
     msg = cls.prompt.format(prompt=prompt[:4000])
     try:
-        resp = litellm.completion(
-            model=cls.model,
-            messages=[{"role": "user", "content": msg}],
-            max_tokens=12,
-            temperature=0,
-        )
-        out = resp["choices"][0]["message"]["content"].strip()
+        from . import llm_dispatch
+        resp = llm_dispatch.completion(
+            cls.model, [{"role": "user", "content": msg}],
+            max_tokens=12, temperature=0)
+        out = (resp["choices"][0]["message"]["content"] or "").strip()
         return _parse_classifier_output(out)
     except Exception:
         log.warning("classifier call failed (model=%s); falling back to mid tier",
@@ -296,19 +359,18 @@ def route(prompt: str, policy: Policy, header_tier: str | None = None) -> RouteD
         else:
             tier = then
         if tier in policy.tiers:
-            return RouteDecision(tier=tier, model=_pick_model(tier, policy),
-                                 reason=f"rule:{rule.get('name', 'unnamed')}")
+            reason = f"rule:{rule.get('name', 'unnamed')}"
+            return RouteDecision(tier=tier, reason=reason,
+                                 model=_pick_model(tier, policy, bucket_for(tier, reason)))
 
     # Classifier fallback (LLM)
     if policy.classifier.enabled:
         classified = _classify(prompt, policy)
         score = classified.score
         tier = _classifier_tier(score, classified.confidence, policy)
-        return RouteDecision(tier=tier, model=_pick_model(tier, policy),
-                             reason=(
-                                 f"classifier:score={score};"
-                                 f"confidence={classified.confidence:.2f}"
-                             ))
+        reason = f"classifier:score={score};confidence={classified.confidence:.2f}"
+        return RouteDecision(tier=tier, reason=reason,
+                             model=_pick_model(tier, policy, bucket_for(tier, reason)))
 
     # Embedding-classifier fallback (Layer 3): when the LLM classifier is
     # disabled, a kNN over the labelled corpus still routes better than a flat
@@ -317,12 +379,14 @@ def route(prompt: str, policy: Policy, header_tier: str | None = None) -> RouteD
     if ec is not None:
         tier, conf = ec
         if tier in policy.tiers:
-            return RouteDecision(tier=tier, model=_pick_model(tier, policy),
-                                 reason=f"embed_classifier:tier={tier};confidence={conf:.2f}")
+            reason = f"embed_classifier:tier={tier};confidence={conf:.2f}"
+            return RouteDecision(tier=tier, reason=reason,
+                                 model=_pick_model(tier, policy, bucket_for(tier, reason)))
 
     # Default
-    return RouteDecision(tier="cheap", model=_pick_model("cheap", policy),
-                         reason="default:cheap")
+    reason = "default:cheap"
+    return RouteDecision(tier="cheap", reason=reason,
+                         model=_pick_model("cheap", policy, bucket_for("cheap", reason)))
 
 
 def embed_would_have_tier(prompt: str, policy: Policy) -> str | None:

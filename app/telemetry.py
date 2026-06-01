@@ -78,6 +78,21 @@ CREATE TABLE IF NOT EXISTS tuner_log (
     reverted INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_tuner_ts ON tuner_log(ts);
+
+CREATE TABLE IF NOT EXISTS provider_score (
+    bucket TEXT NOT NULL,       -- "<tier>:<route_reason_family>", e.g. "mid:rule:stack_trace"
+    provider TEXT NOT NULL,     -- "anthropic" | "openai" | "gemini" | "ollama" | ...
+    tier TEXT,
+    wins INTEGER NOT NULL DEFAULT 0,
+    losses INTEGER NOT NULL DEFAULT 0,
+    ties INTEGER NOT NULL DEFAULT 0,
+    n INTEGER NOT NULL DEFAULT 0,
+    sum_cost REAL NOT NULL DEFAULT 0,        -- running sums for composite scoring
+    sum_latency_ms REAL NOT NULL DEFAULT 0,
+    sum_tokens_out REAL NOT NULL DEFAULT 0,
+    updated_ts REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket, provider)
+);
 """
 
 # Additive migrations applied on every init_db(). Each statement is wrapped in
@@ -90,6 +105,9 @@ _MIGRATIONS: list[str] = [
     # team_id is nullable: anonymous (no Bearer header) calls stay supported.
     "ALTER TABLE calls ADD COLUMN team_id TEXT",
     "ALTER TABLE calls ADD COLUMN would_have_tier TEXT",
+    "ALTER TABLE provider_score ADD COLUMN sum_cost REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE provider_score ADD COLUMN sum_latency_ms REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE provider_score ADD COLUMN sum_tokens_out REAL NOT NULL DEFAULT 0",
 ]
 
 
@@ -216,6 +234,7 @@ def record_feedback(*, request_id: str | None, rating: int,
         "request_id": request_id,
         "rating": rating,
         "picked_tier": (call or {}).get("picked_tier"),
+        "picked_provider": (call or {}).get("picked_provider"),
         "route_reason": (call or {}).get("route_reason"),
         "prompt_hash": (call or {}).get("prompt_hash"),
         "team_id": (call or {}).get("team_id"),
@@ -286,6 +305,92 @@ def verdict_by_pair(window_minutes: int = 7 * 24 * 60) -> list[dict]:
                GROUP BY picked_tier, shadow_tier""",
             (start,),
         ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# In-process cache for best_provider() lookups (router hot path). Keyed by
+# bucket -> (timestamp, {provider: (n, win_rate)}). Invalidated on write.
+_PROVIDER_SCORE_CACHE: dict[str, tuple] = {}
+_PROVIDER_SCORE_TTL = 10.0
+
+
+def record_provider_outcome(*, bucket: str, provider: str, tier: str | None,
+                            outcome: str, cost: float = 0.0,
+                            latency_ms: float = 0.0, tokens_out: float = 0.0) -> None:
+    """Tally one provider outcome for a prompt bucket. `outcome` is
+    'win' | 'loss' | 'tie'. Also accumulates cost/latency/burn so composite
+    scoring reads everything from this one self-contained row (no fragile join
+    to the calls table, where shadow rows carry a different route_reason)."""
+    w = 1 if outcome == "win" else 0
+    l = 1 if outcome == "loss" else 0
+    t = 1 if outcome == "tie" else 0
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO provider_score (bucket, provider, tier, wins, losses, ties, n,
+                sum_cost, sum_latency_ms, sum_tokens_out, updated_ts)
+            VALUES (?,?,?,?,?,?,1,?,?,?,?)
+            ON CONFLICT(bucket, provider) DO UPDATE SET
+                wins=wins+excluded.wins, losses=losses+excluded.losses,
+                ties=ties+excluded.ties, n=n+1, tier=excluded.tier,
+                sum_cost=sum_cost+excluded.sum_cost,
+                sum_latency_ms=sum_latency_ms+excluded.sum_latency_ms,
+                sum_tokens_out=sum_tokens_out+excluded.sum_tokens_out,
+                updated_ts=excluded.updated_ts
+            """,
+            (bucket, provider, tier, w, l, t,
+             float(cost or 0.0), float(latency_ms or 0.0), float(tokens_out or 0.0),
+             time.time()),
+        )
+    _PROVIDER_SCORE_CACHE.pop(bucket, None)
+
+
+def _provider_winrates(bucket: str) -> dict[str, tuple[int, float]]:
+    """{provider: (n, win_rate)} for a bucket. Cached in-process (10s TTL).
+    win_rate = (wins + 0.5*ties) / n."""
+    now = time.time()
+    cached = _PROVIDER_SCORE_CACHE.get(bucket)
+    if cached and now - cached[0] < _PROVIDER_SCORE_TTL:
+        return cached[1]
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT provider, wins, ties, n FROM provider_score WHERE bucket = ?",
+            (bucket,),
+        ).fetchall()
+    out: dict[str, tuple[int, float]] = {}
+    for r in rows:
+        n = int(r["n"] or 0)
+        if n > 0:
+            out[r["provider"]] = (n, (int(r["wins"] or 0) + 0.5 * int(r["ties"] or 0)) / n)
+    _PROVIDER_SCORE_CACHE[bucket] = (now, out)
+    return out
+
+
+def best_provider(bucket: str, candidates: list[str], min_n: int) -> str | None:
+    """Pick the provider with the highest win-rate for `bucket` among
+    `candidates` (each having >= min_n samples). None when no candidate has
+    enough data — caller falls back to its default order (cold start)."""
+    if not bucket or not candidates:
+        return None
+    rates = _provider_winrates(bucket)
+    eligible = [(p, rates[p][1]) for p in candidates
+                if p in rates and rates[p][0] >= min_n]
+    if not eligible:
+        return None
+    eligible.sort(key=lambda kv: kv[1], reverse=True)
+    return eligible[0][0]
+
+
+def provider_scores(bucket: str | None = None, limit: int = 200) -> list[dict]:
+    """Raw provider_score rows for inspection (admin/explorer)."""
+    with _conn() as c:
+        if bucket:
+            rows = c.execute(
+                "SELECT * FROM provider_score WHERE bucket = ? ORDER BY n DESC LIMIT ?",
+                (bucket, limit)).fetchall()
+        else:
+            rows = c.execute(
+                "SELECT * FROM provider_score ORDER BY n DESC LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]
 
 

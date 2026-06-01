@@ -28,11 +28,11 @@ style: |
 
 # ClearView
 
-## LLM cost-router middleware
+## Single entry LLM gateway
 
 <span class="pill">✓ MVP</span> &nbsp; <span class="pill">✓ subscription mode</span> &nbsp; <span class="pill">✓ multi-tenant</span>
 
-Routes every prompt to the cheapest capable model.
+Point your tools at ClearView once, and it routes across providers for you.
 Surfaces tokens, cost, latency, savings in real time.
 
 ---
@@ -50,7 +50,8 @@ Surfaces tokens, cost, latency, savings in real time.
 
 ## The solution
 
-One drop-in OpenAI-compatible proxy. Set `OPENAI_BASE_URL` and stop overpaying.
+One drop-in OpenAI-compatible gateway. Set `OPENAI_BASE_URL` once and route
+across providers.
 
 ```
 ┌─ Client (Cursor / Continue / curl / SDK) ─┐

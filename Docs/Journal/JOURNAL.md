@@ -1,3 +1,40 @@
+# 2026-05-21 00:01
+## Completed
+- Routing-accuracy **Layer 2** (auto-shadow + LLM judge): shadow on rule/classifier disagreement, judge grades shadow vs served 1-5 → `shadow_verdict` misroute corpus. `/admin/shadow_verdicts`, `/admin/rule_hits` + explorer ROUTING QUALITY panel. (commits e36cbed, f410d3d)
+- Routing-accuracy **Layer 3**: thumbs feedback corpus (`feedback` table, `POST /feedback`); embedding classifier (`app/embed_classifier.py`, kNN over fixtures, router fallback); online tuner (`app/tuner.py`, auto-apply policy.yaml w/ backup+revert, `/admin/tune*`). (commit caa45ad)
+- **Zero-config setup**: built-in mock provider (`app/providers/mock.py`, $0 always-callable), graceful tier fallback (up→down→mock), on-failure mock fallback, setup doctor (`app/doctor.py` probe + tailored policy + `--ide` config generator) + `/admin/setup`. (commit 007fcb7)
+- **IDE onboarding flow** verified live: dummy client key accepted, `clearview-auto` routes to real LLM (non-stream+stream); per-extension config generator; `x-clearview-tier|model` headers; optional `CLEARVIEW_CLIENT_KEYS` gateway lock. Wired Continue config at `~/.continue/config.yaml`.
+- **Quality-learned provider selection** (P1-P3): `provider_score` table + `best_provider()` + `bucket_for()`; `_pick_model` prefers learned-winner provider, cold-start safe; provider-level auto-shadow + judge writes scores; thumbs feedback feeds scores; `/admin/provider_scores` + explorer PROVIDER LEARNING panel. Live closed-loop verified (cold→winner after judged wins).
+- **Fixed IDE-context routing bug**: routing + short-output escalation now key off the latest user turn, not the IDE-injected context bulk. "how many days in a week" + 12k ctx → was Opus, now Haiku (cheap).
+- **Fixed classifier + judge in subscription mode**: both called litellm directly → 401 in CLI-only mode. New `app/llm_dispatch.py` shares CLI-aware dispatch. Classifier now returns real scores via CLI; judge produces verdicts.
+- Confirmed all 3 subscription CLIs work (claude/codex/gemini return PONG); enabled provider learning in `.env`; live traffic shows Codex A/B-tested every request.
+- Test hygiene: hermetic `conftest` fixture clears ambient `.env` flags (litellm `load_dotenv` leak). Built showcase deck (`Docs/showcase.html`). Suite 230→**301 passing**.
+
+## Next steps
+- **#13 stock-market composite scoring** (tomorrow): blend quality+cost+latency+token-burn → weighted total → multiplier defines route. Data already in telemetry.
+- Rotate `_provider_shadow_alt` through ALL alternates — today only first non-served (Gemini never sampled in 3-provider tier).
+- #10 narrow `medium_prompt` catch-all so classifier drives more routing.
+- Commit the large uncommitted batch (provider learning, IDE flow, mock/doctor, fixes) — many files dirty.
+- Lower `CLEARVIEW_PROVIDER_SHADOW_RATE` from 1.0 — every request = 3 CLI calls.
+
+## Files changed
+- `app/router.py` — `_pick_model(bucket)` learned pick, `bucket_for`, embed-classifier fallback, classifier via `llm_dispatch`, last-user-turn routing
+- `app/telemetry.py` — `shadow_verdict`, `feedback`, `tuner_log`, `provider_score` tables + helpers (`best_provider`, `record_provider_outcome`, `record_feedback`, `record_verdict`)
+- `app/main.py` — auto-shadow + provider-shadow + judge wiring, `/feedback`, `/admin/{setup,tune,tune/revert,tune/history,provider_scores,feedback,shadow_verdicts,rule_hits}`, mock dispatch + on-failure fallback, client-key gate, last-user-turn routing/escalation fix
+- `app/shadow_judge.py` (new), `app/embed_classifier.py` (new), `app/tuner.py` (new), `app/doctor.py` (new), `app/providers/mock.py` (new), `app/llm_dispatch.py` (new)
+- `app/pricing.py` — mock/* = $0
+- `app/templates/explorer.html` — ROUTING QUALITY + PROVIDER LEARNING panels
+- `tests/` — `test_auto_shadow.py`, `test_layer3.py`, `test_setup.py`, `test_provider_learning.py` (new); hermetic-flags fixture in `conftest.py`
+- `Docs/` — `Checklist.md`, `IDE_SETUP.md`, `showcase.html`, `Journal/JOURNAL.md`
+- `.env`, `~/.continue/config.yaml` — enabled 3 CLIs + provider learning; Continue model entry
+
+## Open questions / blockers
+- Big uncommitted batch on `main` (committed: Layers 2/3 + setup; NOT committed: IDE flow, provider learning P1-P3, classifier/judge CLI fix, routing fix, showcase). Commit before tomorrow.
+- Provider learning all-ties on trivia (judge can't separate equal answers) → routing stays anthropic; needs prompts where providers differ to demonstrate a flip.
+- `CLEARVIEW_PROVIDER_SHADOW_RATE=1.0` burns 3× subscription calls per request — demo only.
+
+---
+
 # 2026-05-11 20:44
 
 ## Completed
