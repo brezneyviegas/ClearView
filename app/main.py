@@ -68,6 +68,16 @@ _TICKER_CACHE_TTL = 2.0
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global POLICY
+    # First-run UX: app loggers default to the root WARNING level under plain
+    # uvicorn, which would swallow the startup hints below. Give the clearview
+    # namespace an INFO handler unless the operator configured logging.
+    cv_log = logging.getLogger("clearview")
+    if not cv_log.handlers and not logging.getLogger().handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
+        cv_log.addHandler(h)
+        cv_log.setLevel(logging.INFO)
+        cv_log.propagate = False
     POLICY = load_policy()
     telemetry.init_db()
     teams.init_db()
@@ -77,6 +87,15 @@ async def lifespan(app: FastAPI):
     for tier, models in avail.items():
         if not models:
             log.warning("tier %s has zero available models given current env vars", tier)
+    host = os.environ.get("CLEARVIEW_HOST", "127.0.0.1")
+    host = "localhost" if host in ("0.0.0.0", "127.0.0.1") else host
+    port = os.environ.get("CLEARVIEW_PORT", "8000")
+    log.info("ClearView up — explorer: http://%s:%s/admin/explorer · chat: http://%s:%s/chat",
+             host, port, host, port)
+    n_real = sum(1 for ms in avail.values() for m in ms if not m.startswith("mock/"))
+    if n_real == 0:
+        log.info("no providers configured — requests will be served by the built-in "
+                 "$0 mock. Run `python -m app.doctor` to see what this machine can use.")
     yield
 
 

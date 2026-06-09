@@ -10,21 +10,49 @@ routing decisions.
 It exposes OpenAI-compatible APIs, compatibility shims for Anthropic/Gemini
 clients, an operator dashboard, and a lightweight chat UI for teams.
 
+![ClearView cost explorer — ticker tape, burn rate, savings vs always-frontier, per-call routing](Docs/images/clearview-explorer-fold.png)
+
+*Live cost explorer: model ticker tape, burn rate, native vs plan-equivalent
+spend (63% saved here), and per-call rows — the blue `LOCAL` rows are agent
+execution turns served by ollama at $0 via plan/execute stage routing.*
+
+<details>
+<summary>Full dashboard (charts, provider learning, routing quality panels)</summary>
+
+![ClearView explorer full page](Docs/images/clearview-explorer-full.png)
+
+</details>
+
 ---
 
 ## Quick Start
 
+Requires Python 3.11+ (`brew install python@3.12` / `apt install python3.12`).
+
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
-cp .env.example .env
-# Optional: fill in provider keys or enable local CLI subscription adapters.
-# ClearView runs with ZERO providers — see "Adapts to your setup" below.
-
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+make setup   # venv + deps + .env (picks the right python for you)
+make run     # start the gateway at http://localhost:8000
 ```
+
+No `make`? The manual equivalent:
+
+```bash
+python3.12 -m venv .venv          # any python >= 3.11
+.venv/bin/pip install -e ".[dev]"
+cp .env.example .env
+.venv/bin/python -m app
+```
+
+Or Docker, no Python needed:
+
+```bash
+docker compose up                  # gateway only
+docker compose --profile local up  # gateway + ollama for the free local tier
+```
+
+You don't need any provider keys to try it — with zero providers configured,
+a built-in $0 mock serves requests so the dashboard, chat, and APIs all work
+out of the box. Add keys / CLI adapters / ollama in `.env` when ready.
 
 ### Adapts to your setup
 

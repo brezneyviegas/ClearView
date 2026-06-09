@@ -1,0 +1,28 @@
+# ClearView + optional local ollama for the free `local` tier.
+#   docker compose up                 # gateway only (mock serves with no providers)
+#   docker compose --profile local up # gateway + ollama
+services:
+  clearview:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - CLEARVIEW_OLLAMA_PROBE=1
+    volumes:
+      - clearview-data:/data
+
+  ollama:
+    image: ollama/ollama
+    profiles: ["local"]
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+
+volumes:
+  clearview-data:
+  ollama-models:

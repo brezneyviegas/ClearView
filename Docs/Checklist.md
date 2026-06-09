@@ -9,6 +9,31 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
 
 ## Priority queue
 
+- [x] **16. OSS onboarding — fresh clone to running in 1–2 commands.** (2026-06-09)
+  - [x] Fresh-user simulation: cloned to /tmp, followed README with zero
+        keys/CLIs. Friction found: stock `python3` was 3.10 vs required 3.11+
+        (install fails); app INFO logs invisible under plain uvicorn (startup
+        hints swallowed by root WARNING level).
+  - [x] `Makefile`: `make setup` (picks newest python ≥3.11, venv, deps,
+        .env from example, version guard with clear error), `make run`,
+        `make doctor`, `make test`, `make clean`.
+  - [x] `app/__main__.py`: `python -m app` entrypoint honouring
+        CLEARVIEW_HOST/PORT.
+  - [x] `.env.example` rewritten: all knobs documented (CLI adapters, ollama
+        probe, mock, caches, provider learning/scoring, admin token), optional
+        ones commented out, safe zero-config defaults.
+  - [x] `Dockerfile` + `docker-compose.yml` (`--profile local` adds ollama).
+        Verified: image builds, container serves mock/echo with no providers.
+  - [x] First-run UX: lifespan attaches an INFO handler to the clearview
+        logger (when operator hasn't configured logging) and logs explorer/chat
+        URLs + a doctor hint when no real provider is reachable.
+  - [x] README Quick Start rewritten: make path, manual path, docker path,
+        python version stated, zero-config promise up front.
+  - [x] Verified end-to-end on fresh clone: `make setup` → `python -m app` →
+        /health ok, /v1/chat/completions served (by local ollama via probe —
+        zero-key machine with ollama gets free local model; without ollama,
+        mock), explorer + chat 200. Suite 359 pass.
+
 - [x] **14. Plan/execute stage routing** (frontier plans, local ollama executes).
   - [x] `StagesCfg` in config (`stages:` block — enabled/plan/execute/auto_detect);
         `local` tier (`ollama/llama3.2`) added to policy.yaml + `_TIER_ORDER`
