@@ -25,12 +25,22 @@ class BudgetCfg(BaseModel):
     on_breach: str = "reject"
 
 
+class StagesCfg(BaseModel):
+    """Plan/execute workflow routing: plan turns go to a strong tier, execution
+    turns (agent loops with tool results) go to a local/cheap tier."""
+    enabled: bool = False
+    plan: str = "frontier"
+    execute: str = "local"
+    auto_detect: bool = True
+
+
 class Policy(BaseModel):
     tiers: dict[str, list[str]]
     rules: list[dict[str, Any]] = Field(default_factory=list)
     classifier: ClassifierCfg
     escalation: EscalationCfg = EscalationCfg()
     budget: BudgetCfg = BudgetCfg()
+    stages: StagesCfg = StagesCfg()
     baseline_model: str
 
 

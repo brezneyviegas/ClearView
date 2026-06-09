@@ -79,12 +79,32 @@ Every chat response carries headers so you can confirm routing without the
 dashboard:
 
 ```text
-x-clearview-tier        cheap | mid | frontier
+x-clearview-tier        local | cheap | mid | frontier
 x-clearview-model       the model that actually served the request
 x-clearview-request-id  correlate with telemetry / /admin/calls_detail
 ```
 
 Watch routing live at `http://localhost:8000/admin/explorer`.
+
+## Plan/execute stage routing (frontier plans, local executes)
+
+With `stages.enabled: true` in `policy.yaml`, ClearView routes agent workflows
+in two phases: planning turns go to the frontier tier, execution turns go to
+the `local` tier (ollama). Request header:
+
+```text
+x-clearview-stage: plan      # force the frontier planning tier
+x-clearview-stage: execute   # force the local execution tier
+```
+
+Without the header, `auto_detect` flags a turn as `execute` when the message
+history already carries tool results or assistant `tool_calls` — i.e. the
+agent loop is underway and the plan has been made. `x-clearview-tier` still
+overrides everything.
+
+Resilience: with `CLEARVIEW_OLLAMA_PROBE=1`, execute turns fall back to the
+cheap cloud tier when ollama isn't running; a refusal or suspiciously short
+local answer is retried one tier up (`quality_escalated` in route_reason).
 
 ## Locking the gateway (shared networks)
 

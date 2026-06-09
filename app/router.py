@@ -41,7 +41,9 @@ IMPERATIVE_RE = re.compile(
 log = logging.getLogger("clearview.router")
 
 # Tier order for upward escalation when a tier has no available models.
-_TIER_ORDER = ["cheap", "mid", "frontier"]
+# "local" (ollama) sits below cheap: normal traffic never drops into it, but
+# stage-routed execution turns start there and escalate up when ollama is down.
+_TIER_ORDER = ["local", "cheap", "mid", "frontier"]
 
 # Module-level availability set populated at startup by build_availability().
 # Maps tier name -> ordered list of available models in that tier.
@@ -61,12 +63,43 @@ class ClassifierDecision:
     confidence: float
 
 
+# Ollama runtime health probe (TTL cache). Opt-in via CLEARVIEW_OLLAMA_PROBE=1:
+# when on, ollama/* models count as available only if the local server answers,
+# so stage-routed execution falls back to cloud tiers instead of erroring.
+_OLLAMA_PROBE_TTL = 30.0
+_ollama_probe_cache: tuple[float, bool] | None = None
+
+
+def _ollama_probe_enabled() -> bool:
+    return os.environ.get("CLEARVIEW_OLLAMA_PROBE", "0").strip() == "1"
+
+
+def _ollama_up() -> bool:
+    global _ollama_probe_cache
+    import time
+    now = time.monotonic()
+    if _ollama_probe_cache and now - _ollama_probe_cache[0] < _OLLAMA_PROBE_TTL:
+        return _ollama_probe_cache[1]
+    base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    ok = False
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"{base}/api/tags", timeout=1.0) as resp:
+            ok = resp.status == 200
+    except Exception:
+        ok = False
+    _ollama_probe_cache = (now, ok)
+    return ok
+
+
 def _provider_available(model: str) -> bool:
     """Decide if a given prefixed model id is callable based on env var presence."""
     if model.startswith("mock/"):
         # The mock provider is always callable — it needs no setup.
         return True
     if model.startswith("ollama/") or model.startswith("ollama_chat/"):
+        if _ollama_probe_enabled():
+            return _ollama_up()
         return True
     if model.startswith("anthropic/"):
         # Subscription mode: the local Claude CLI fulfills Anthropic calls
@@ -342,11 +375,49 @@ def would_have_tier(prompt: str, policy: Policy) -> str | None:
     return _classifier_tier(classified.score, classified.confidence, policy)
 
 
-def route(prompt: str, policy: Policy, header_tier: str | None = None) -> RouteDecision:
+_STAGES = ("plan", "execute")
+
+
+def detect_stage(messages: list[dict], header_stage: str | None,
+                 policy: Policy) -> str | None:
+    """Resolve the workflow stage for this request, or None for normal routing.
+
+    Explicit x-clearview-stage header wins. With auto_detect on, a conversation
+    that already carries tool results / tool_calls is an agent execution loop —
+    the plan has been made, so the turn is flagged "execute"."""
+    if not policy.stages.enabled:
+        return None
+    if header_stage is not None:
+        hs = header_stage.strip().lower()
+        if hs in _STAGES:
+            return hs
+        log.warning("ignoring invalid x-clearview-stage header value: %r", header_stage)
+    if not policy.stages.auto_detect:
+        return None
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") == "tool" or (m.get("role") == "assistant" and m.get("tool_calls")):
+            return "execute"
+    return None
+
+
+def route(prompt: str, policy: Policy, header_tier: str | None = None,
+          stage: str | None = None) -> RouteDecision:
     # Validate header_tier: ignore if not a known tier name.
     if header_tier is not None and header_tier not in policy.tiers:
         log.warning("ignoring invalid x-clearview-tier header value: %r", header_tier)
         header_tier = None
+
+    # Stage routing (plan/execute workflow). Explicit x-clearview-tier still
+    # wins (handled by the explicit_override rule below when header_tier set).
+    if stage in _STAGES and policy.stages.enabled and header_tier is None:
+        tier = getattr(policy.stages, stage)
+        if tier in policy.tiers:
+            reason = f"stage:{stage}"
+            return RouteDecision(tier=tier, reason=reason,
+                                 model=_pick_model(tier, policy, bucket_for(tier, reason)))
+        log.warning("stage %r maps to unknown tier %r; falling through", stage, tier)
 
     # Rule layer
     for rule in policy.rules:

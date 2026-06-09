@@ -1,18 +1,31 @@
 # ClearView routing policy
-# Tier order: cheap -> mid -> frontier
+# Tier order: local -> cheap -> mid -> frontier
 tiers:
+  local:
+    - ollama/llama3.2
   cheap:
     - anthropic/claude-haiku-4-5
     - openai/gpt-4o-mini
-    - gemini/gemini-1.5-flash
+    - gemini/gemini-2.0-flash
     - ollama/llama3.2
   mid:
     - anthropic/claude-sonnet-4-6
     - openai/gpt-4o
-    - gemini/gemini-1.5-pro
+    - gemini/gemini-2.5-flash
   frontier:
-    - anthropic/claude-opus-4-7
-    - openai/gpt-4o
+    - anthropic/claude-opus-4-8
+    - openai/o3
+
+# Plan/execute workflow routing.
+# Plan turns route to the frontier tier; execution turns (agent loops carrying
+# tool results / tool_calls) route to the local tier (ollama). Explicit
+# x-clearview-stage: plan|execute header wins; auto_detect flags execute turns
+# from message structure. x-clearview-tier still overrides everything.
+stages:
+  enabled: true
+  plan: frontier
+  execute: local
+  auto_detect: true
 
 # Rule engine (top-down, first match wins)
 rules:
@@ -53,8 +66,11 @@ rules:
   - name: imperative_work
     if: { imperative: true, tokens_gte: 200 }
     then: mid
+  # Narrowed catch-all: only short no-code prompts default cheap. Anything
+  # 500+ tokens (or shorter but code-bearing) that no rule caught now reaches
+  # the classifier instead of being silently floored to cheap.
   - name: medium_prompt
-    if: { tokens_lt: 1500 }
+    if: { tokens_lt: 500, no_code: true }
     then: cheap
 
 # Classifier fallback (when no rule matches)
@@ -93,4 +109,4 @@ budget:
   on_breach: reject  # reject | warn | allow
 
 # Baseline used for plan-equiv cost (drift % calculation)
-baseline_model: anthropic/claude-opus-4-7
+baseline_model: anthropic/claude-opus-4-8

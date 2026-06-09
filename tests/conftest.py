@@ -25,8 +25,19 @@ _AMBIENT_FLAGS = (
     "CLEARVIEW_USE_MOCK", "CLEARVIEW_MOCK_ON_FAILURE",
     "CLEARVIEW_AUTO_SHADOW", "CLEARVIEW_AUTO_SHADOW_JUDGE", "CLEARVIEW_EMBED_CLASSIFIER",
     "CLEARVIEW_CLIENT_KEYS", "CLEARVIEW_PROVIDER_LEARNING", "CLEARVIEW_PROVIDER_SHADOW",
-    "CLEARVIEW_PROVIDER_SCORING",
+    "CLEARVIEW_PROVIDER_SCORING", "CLEARVIEW_OLLAMA_PROBE",
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_router_availability():
+    """build_availability() mutates router._AVAILABLE module-global; tests that
+    trigger it (app startup, direct calls) used to leak state into later tests
+    (order-dependent failures). Save/restore around every test."""
+    from app import router
+    saved = dict(router._AVAILABLE)
+    yield
+    router._AVAILABLE = saved
 
 
 @pytest.fixture(autouse=True)

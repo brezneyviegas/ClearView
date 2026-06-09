@@ -9,6 +9,48 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
 
 ## Priority queue
 
+- [x] **14. Plan/execute stage routing** (frontier plans, local ollama executes).
+  - [x] `StagesCfg` in config (`stages:` block — enabled/plan/execute/auto_detect);
+        `local` tier (`ollama/llama3.2`) added to policy.yaml + `_TIER_ORDER`
+        (below cheap: normal traffic never drops in, execute starts there).
+  - [x] `router.detect_stage(messages, header, policy)`: explicit
+        `x-clearview-stage: plan|execute` header wins; auto-detect flags
+        execute when history carries tool-role messages or assistant
+        tool_calls (agent loop = plan already made). `route(..., stage=)`
+        maps stage→tier, reason `stage:plan|execute`. `x-clearview-tier`
+        still overrides everything.
+  - [x] Runtime ollama health probe (`CLEARVIEW_OLLAMA_PROBE=1`, 30s TTL,
+        urllib on `OLLAMA_BASE_URL/api/tags`): ollama down → local tier empty
+        → execute escalates up to cheap cloud instead of erroring.
+  - [x] main.py wiring; stage-routed turns skip `would_have_tier` +
+        auto-shadow (deliberate picks, not complexity judgements — avoids
+        cloud shadow on every high-volume execute turn).
+  - [x] Quality gate verified: main.py had its own `_TIER_ORDER` without
+        "local" — `_next_tier("local")` returned None so weak local output
+        never escalated. Fixed: main now imports router's ladder. E2e test:
+        ollama refusal → retried one tier up → `quality_escalated` in
+        route_reason.
+  - [x] End-to-end HTTP tests: `x-clearview-stage` header (plan + execute),
+        auto-detect from tool history, tier-header precedence, quality
+        escalation — 5 tests through `/v1/chat/completions` with the real
+        policy.yaml.
+  - [x] Stage header documented in `Docs/IDE_SETUP.md` (new section).
+  - [-] Telemetry `stage` column: skipped — route_reason carries `stage:*`,
+        explorer shows it per-call; add a column only if rollups ever needed.
+  - [x] 27 tests (`tests/test_stage_routing.py`). 359 pass.
+  - [x] Live-verified (2026-06-09, real server + real models): `plan` header →
+        frontier (claude-opus-4-8 via CLI); `execute` header → local
+        (ollama/llama3.2, real generation); auto-detect from tool-call
+        history → local. Ollama started on the machine for this.
+
+- [x] **15. Carried-over fixes.**
+  - [x] `_provider_shadow_alt` now rotates through ALL alternate providers
+        (random pick over one candidate per provider — Gemini gets sampled
+        in a 3-provider tier).
+  - [x] `_AVAILABLE` test-isolation bug: autouse conftest fixture
+        saves/restores `router._AVAILABLE` per test (kills order-dependent
+        failures between test_api.py and test_router.py).
+
 - [x] **12. Quality-learned provider selection** (route to the right *provider*,
   not just the right tier — "sometimes Gemini, sometimes Codex").
   - [x] **P1 foundation:** `provider_score` table `(bucket,provider)→wins/losses/ties/n`;
@@ -72,17 +114,14 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
     providers (today only the first non-served one — Gemini never sampled in a
     3-provider tier).
 
-- [ ] **10. Widen classifier reach — narrow `medium_prompt` catch-all.**
-  - Today `medium_prompt` (`tokens_lt: 1500 → cheap`) intercepts almost every
-    short prompt before the classifier runs, so the Haiku classifier only fires
-    in the 1500–4000-token window. Result: most routing is rule-driven, the
-    classifier rarely decides.
-  - Goal: let the classifier drive more decisions. Options: drop/raise the
-    `medium_prompt` floor, or gate it to obviously-trivial prompts only, or move
-    the classifier ahead of it for mid-length prompts.
-  - Must re-run `eval/run_eval.py --gate` after — narrowing changes routing
-    accuracy + cost; keep the gate green.
-  - Files: `policy.yaml` (rule), `eval/fixtures.json` / `eval/gate.json`.
+- [x] **10. Widen classifier reach — narrow `medium_prompt` catch-all.**
+  - `medium_prompt` narrowed `tokens_lt: 1500` → `tokens_lt: 500, no_code: true`.
+    Prompts 500+ tokens (or shorter but code-bearing) that no rule catches now
+    reach the classifier instead of being floored to cheap. All
+    medium_prompt-dependent eval fixtures were <200 tokens (tiny_prompt covers
+    them) — no fixture churn needed.
+  - Eval gate re-run: PASS — 50/51 overall (98.0%), rule layer 100%. Full
+    suite 359 pass.
 
 - [x] **9. Adapt to user's setup (zero-config) + setup doctor.**
   - [x] Built-in mock/echo provider (`app/providers/mock.py`): canned $0
@@ -266,4 +305,4 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` done · `[-]` dropped
 
 ---
 
-_Last touched: 2026-05-20 (Layer 3 + zero-config setup). Update this date when you change the list._
+_Last touched: 2026-06-09 (plan/execute stage routing + carried-over fixes). Update this date when you change the list._

@@ -22,15 +22,12 @@ from . import cache, chat as chat_store, shadow_judge, teams, telemetry, tuner
 from .config import Policy, baseline_model_env, load_policy
 from .pricing import cost_for, cost_per_1k_out, drift_pct
 from .providers import claude_cli, codex_cli, gemini_cli, mock as mock_provider
-from .router import build_availability, route, would_have_tier
+from .router import _TIER_ORDER, build_availability, route, would_have_tier
 
 log = logging.getLogger("clearview.main")
 
 POLICY: Policy | None = None
 TEMPLATES = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
-
-# Tier ladder for upward escalation.
-_TIER_ORDER = ["cheap", "mid", "frontier"]
 
 # Static map: provider model id → ticker symbol. Falls back to last `/`-segment
 # uppercased + alnum-only + truncated to 8 chars when key missing.
@@ -350,6 +347,7 @@ async def list_models() -> dict:
     pol = _policy()
     virtual = [
         {"id": "clearview-auto", "object": "model", "owned_by": "clearview"},
+        {"id": "clearview-local", "object": "model", "owned_by": "clearview"},
         {"id": "clearview-cheap", "object": "model", "owned_by": "clearview"},
         {"id": "clearview-mid", "object": "model", "owned_by": "clearview"},
         {"id": "clearview-frontier", "object": "model", "owned_by": "clearview"},
@@ -586,9 +584,17 @@ async def _handle_chat_completions(request: Request, body: dict[str, Any]) -> An
                 reason=f"direct_model:{requested}",
             )
         else:
-            decision = route(route_text, pol, header_tier=header_tier)
+            from .router import detect_stage
+            stage = detect_stage(messages, request.headers.get("x-clearview-stage"), pol)
+            decision = route(route_text, pol, header_tier=header_tier, stage=stage)
     classifier_tier: str | None = None
-    if os.environ.get("CLEARVIEW_ROUTING_QUALITY", "1") != "0":
+    # Stage-routed turns are deliberate tier picks (plan/execute workflow), not
+    # complexity judgements — comparing them against the classifier would only
+    # manufacture disagreement noise and fire costly auto-shadows on every
+    # high-volume execution turn.
+    if decision.reason.startswith("stage:"):
+        pass
+    elif os.environ.get("CLEARVIEW_ROUTING_QUALITY", "1") != "0":
         try:
             classifier_tier = would_have_tier(route_text, pol)
         except Exception as e:  # noqa: BLE001
@@ -1648,11 +1654,16 @@ def _provider_shadow_alt(tier: str, used_model: str) -> str | None:
         return None
     from .router import availability
     served = used_model.split("/", 1)[0]
+    # One candidate per distinct alternate provider; random pick so every
+    # alternate gets sampled over time (not just the first-listed one).
+    candidates: dict[str, str] = {}
     for m in availability().get(tier, []):
         prov = m.split("/", 1)[0]
-        if prov != served and not mock_provider.is_available_model(m):
-            return m
-    return None
+        if prov != served and not mock_provider.is_available_model(m) and prov not in candidates:
+            candidates[prov] = m
+    if not candidates:
+        return None
+    return random.choice(list(candidates.values()))
 
 
 def _shadow_judge_model() -> str:

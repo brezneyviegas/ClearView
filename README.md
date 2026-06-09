@@ -74,6 +74,7 @@ Then choose a ClearView virtual model:
 
 ```text
 clearview-auto
+clearview-local
 clearview-cheap
 clearview-mid
 clearview-frontier
@@ -110,9 +111,14 @@ for tools that read environment variables.
   - Gemini streaming variants
 - Virtual models:
   - `clearview-auto`
+  - `clearview-local`
   - `clearview-cheap`
   - `clearview-mid`
   - `clearview-frontier`
+- Plan/execute stage routing: plan turns go to the frontier tier, agent
+  execution turns (tool results / tool_calls in history, or an explicit
+  `x-clearview-stage: plan|execute` header) go to the local tier (ollama),
+  with health-probe fallback to cloud when ollama is down.
 - Direct configured model selection, for example `openai/gpt-4o`.
 - `/chat` UI with team login, conversation history, provider selector, model
   selector, tier selector, streaming responses, and spend-vs-cap meter.
@@ -126,6 +132,11 @@ for tools that read environment variables.
 
 Routing is configured in `policy.yaml`.
 
+0. Stage layer (`stages:` in policy.yaml, frontier plans / local executes):
+   - explicit `x-clearview-stage: plan|execute` header
+   - auto-detect: a conversation already carrying tool results or assistant
+     `tool_calls` is an agent execution loop → `execute` → local tier
+   - `x-clearview-tier` still overrides everything
 1. Rule layer:
    - explicit `x-clearview-tier` override
    - long prompt detection
@@ -151,6 +162,8 @@ rule:stack_trace
 classifier:score=2;confidence=0.40
 direct_model:openai/gpt-4o
 rule:tiny_prompt;quality_escalated
+stage:execute
+stage:plan
 ```
 
 ## Provider Modes
@@ -185,6 +198,11 @@ CLEARVIEW_CLI_TIMEOUT_SEC=120
 
 Subscription-mode rows use `native_cost_usd = 0` and record notional API cost in
 `synth_cost_usd`.
+
+Local models run through ollama (`OLLAMA_BASE_URL`, default `:11434`). With
+`CLEARVIEW_OLLAMA_PROBE=1`, ollama models count as available only when the
+server answers (30s TTL cache), so local-tier routes fall back to cloud tiers
+instead of erroring when ollama is down.
 
 ## Admin And Ops
 
@@ -307,4 +325,4 @@ policy.yaml
 
 ## License
 
-TBD.
+MIT — see [LICENSE](LICENSE).
