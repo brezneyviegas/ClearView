@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -96,10 +97,36 @@ async def lifespan(app: FastAPI):
     if n_real == 0:
         log.info("no providers configured — requests will be served by the built-in "
                  "$0 mock. Run `python -m app.doctor` to see what this machine can use.")
+    bound_host = os.environ.get("CLEARVIEW_HOST", "127.0.0.1")
+    if bound_host not in ("127.0.0.1", "localhost", "::1"):
+        if not os.environ.get("CLEARVIEW_ADMIN_TOKEN"):
+            log.warning("listening on %s with no CLEARVIEW_ADMIN_TOKEN — admin "
+                        "endpoints (and your provider spend data) are open to the "
+                        "network. Set CLEARVIEW_ADMIN_TOKEN to lock them down.", bound_host)
+        if not os.environ.get("CLEARVIEW_CLIENT_KEYS", "").strip():
+            log.warning("listening on %s with no CLEARVIEW_CLIENT_KEYS — anyone on "
+                        "the network can route requests through your provider keys. "
+                        "Set CLEARVIEW_CLIENT_KEYS to require a client key.", bound_host)
     yield
 
 
 app = FastAPI(title="ClearView", version="0.1.0", lifespan=lifespan)
+
+# Cap request body size (memory-DoS guard). Generous default — IDE clients
+# ship large repo contexts. 0 disables.
+_MAX_BODY_BYTES = int(os.environ.get("CLEARVIEW_MAX_BODY_BYTES", str(10 * 1024 * 1024)))
+
+
+@app.middleware("http")
+async def _limit_body_size(request: Request, call_next):
+    if _MAX_BODY_BYTES > 0:
+        cl = request.headers.get("content-length")
+        if cl and cl.isdigit() and int(cl) > _MAX_BODY_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={"error": f"request body exceeds {_MAX_BODY_BYTES} bytes"},
+            )
+    return await call_next(request)
 
 
 def _policy() -> Policy:
@@ -298,7 +325,7 @@ def _admin_auth(request: Request) -> None:
     if not auth.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = auth.split(" ", 1)[1].strip()
-    if token != expected:
+    if not secrets.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="invalid admin token")
 
 
@@ -1696,17 +1723,24 @@ async def post_feedback(request: Request) -> JSONResponse:
 
     Body: {"request_id": "...", "rating": 1 | -1, "note": "optional"}.
     No admin auth — callers rate their own responses (request_id is the handle).
+    Honors the CLEARVIEW_CLIENT_KEYS gateway lock when set, and the request_id
+    must reference a real call: feedback feeds provider-learning scores, so an
+    open endpoint would let anyone steer routing.
     """
+    _client_key_allowed(request)
     try:
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid json"})
     rating = body.get("rating")
-    if rating not in (1, -1, 1.0, -1.0) and not isinstance(rating, (int, float)):
+    if rating not in (1, -1, 1.0, -1.0):
         return JSONResponse(status_code=400,
                             content={"error": "rating must be 1 or -1"})
+    request_id = body.get("request_id")
+    if not request_id or telemetry.get_call(request_id) is None:
+        return JSONResponse(status_code=404, content={"error": "unknown request_id"})
     row = telemetry.record_feedback(
-        request_id=body.get("request_id"),
+        request_id=request_id,
         rating=int(rating),
         note=body.get("note"),
     )
@@ -2536,7 +2570,10 @@ def _prom_escape_label(v: str) -> str:
 
 
 @app.get("/metrics", response_class=PlainTextResponse)
-async def metrics() -> PlainTextResponse:
+async def metrics(request: Request) -> PlainTextResponse:
+    # Same gate as the admin views: per-team counts and spend are tenant data.
+    # Prometheus scrapers pass the token via `authorization: Bearer ...`.
+    _admin_auth(request)
     snap = telemetry.metrics_snapshot()
     lines: list[str] = []
 
@@ -2648,10 +2685,13 @@ async def chat_login(request: Request) -> JSONResponse:
         raise HTTPException(status_code=401, detail="unknown or disabled team")
     resp = JSONResponse({"ok": True, "team_name": t.name})
     # 30-day cookie. HttpOnly so JS can't read it. SameSite=Lax for fetch posts.
+    # CLEARVIEW_COOKIE_SECURE=1 adds the Secure flag for TLS deployments
+    # (default off so plain-http localhost dev keeps working).
     resp.set_cookie(
         "cv_session", token,
         max_age=60 * 60 * 24 * 30,
         httponly=True, samesite="lax", path="/",
+        secure=os.environ.get("CLEARVIEW_COOKIE_SECURE", "0") == "1",
     )
     return resp
 
