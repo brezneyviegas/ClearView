@@ -36,9 +36,16 @@ class TestFeedback:
         assert s["down_rate_pct"] == pytest.approx(33.33, abs=0.01)
 
     def test_endpoint_roundtrip(self, client):
-        r = client.post("/feedback", json={"request_id": "x", "rating": -1})
+        # /feedback only accepts ratings for calls that actually happened —
+        # it feeds provider-learning scores, so unknown ids are rejected.
+        telemetry.record(telemetry.CallRecord(
+            request_id="rqfb", session_id="s", picked_tier="cheap",
+            route_reason="rule:tiny_prompt", prompt_hash="h"))
+        r = client.post("/feedback", json={"request_id": "rqfb", "rating": -1})
         assert r.status_code == 200 and r.json()["ok"]
         assert client.post("/feedback", json={"rating": "nope"}).status_code == 400
+        assert client.post("/feedback", json={"request_id": "rqfb", "rating": 7}).status_code == 400
+        assert client.post("/feedback", json={"request_id": "nope", "rating": 1}).status_code == 404
         assert client.get("/admin/feedback").json()["down"] == 1
 
 
