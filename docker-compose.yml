@@ -18,8 +18,11 @@ services:
   ollama:
     image: ollama/ollama
     profiles: ["local"]
+    # Loopback-only publish: `ollama pull` from this host still works, but the
+    # unauthenticated ollama API is not exposed to the LAN. ClearView reaches
+    # it over the compose network regardless.
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollama-models:/root/.ollama
 
