@@ -17,4 +17,6 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
 VOLUME /data
 EXPOSE 8000
 
+USER nobody
+
 CMD ["python", "-m", "app"]
