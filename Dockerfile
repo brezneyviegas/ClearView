@@ -14,7 +14,13 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
     CLEARVIEW_DB_PATH=/data/clearview.db \
     CLEARVIEW_POLICY_PATH=/app/policy.yaml
 
+# Create a non-root user and own the data directory before switching.
+RUN useradd -r -u 1001 -s /sbin/nologin clearview \
+    && mkdir -p /data && chown clearview:clearview /data
+
 VOLUME /data
 EXPOSE 8000
+
+USER clearview
 
 CMD ["python", "-m", "app"]
