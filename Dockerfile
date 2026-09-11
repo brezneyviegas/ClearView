@@ -14,7 +14,13 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
     CLEARVIEW_DB_PATH=/data/clearview.db \
     CLEARVIEW_POLICY_PATH=/app/policy.yaml
 
+RUN useradd -r -u 1001 -s /sbin/nologin clearview \
+ && mkdir -p /data \
+ && chown -R clearview:clearview /app /data
+
 VOLUME /data
 EXPOSE 8000
+
+USER clearview
 
 CMD ["python", "-m", "app"]
