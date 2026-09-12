@@ -14,7 +14,12 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
     CLEARVIEW_DB_PATH=/data/clearview.db \
     CLEARVIEW_POLICY_PATH=/app/policy.yaml
 
+RUN addgroup --system cv && adduser --system --ingroup cv cv && \
+    mkdir -p /data && chown cv:cv /data
+
 VOLUME /data
 EXPOSE 8000
+
+USER cv
 
 CMD ["python", "-m", "app"]
