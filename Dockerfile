@@ -17,4 +17,8 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
 VOLUME /data
 EXPOSE 8000
 
+RUN useradd -r -u 1001 -s /sbin/nologin clearview \
+    && mkdir -p /data && chown clearview:clearview /data
+USER clearview
+
 CMD ["python", "-m", "app"]
