@@ -17,4 +17,7 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
 VOLUME /data
 EXPOSE 8000
 
+RUN useradd -r -u 1001 -g root clearview && chown -R clearview:root /data 2>/dev/null || true
+USER clearview
+
 CMD ["python", "-m", "app"]
