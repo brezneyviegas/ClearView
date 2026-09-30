@@ -17,4 +17,7 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
 VOLUME /data
 EXPOSE 8000
 
+RUN adduser --disabled-password --gecos "" clearview && chown clearview /data 2>/dev/null || true
+USER clearview
+
 CMD ["python", "-m", "app"]
