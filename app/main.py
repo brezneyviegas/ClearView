@@ -291,6 +291,7 @@ def _looks_refusal_or_too_short(resp: Any, prompt_text: str) -> bool:
 
 def _admin_auth(request: Request) -> None:
     """Raise 401 if CLEARVIEW_ADMIN_TOKEN is set and request lacks matching bearer."""
+    import secrets as _secrets
     expected = os.environ.get("CLEARVIEW_ADMIN_TOKEN")
     if not expected:
         return  # dev mode: open
@@ -298,7 +299,7 @@ def _admin_auth(request: Request) -> None:
     if not auth.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = auth.split(" ", 1)[1].strip()
-    if token != expected:
+    if not _secrets.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="invalid admin token")
 
 
@@ -2536,7 +2537,8 @@ def _prom_escape_label(v: str) -> str:
 
 
 @app.get("/metrics", response_class=PlainTextResponse)
-async def metrics() -> PlainTextResponse:
+async def metrics(request: Request) -> PlainTextResponse:
+    _admin_auth(request)
     snap = telemetry.metrics_snapshot()
     lines: list[str] = []
 
