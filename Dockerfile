@@ -5,7 +5,8 @@ WORKDIR /app
 # Install deps first for layer caching.
 COPY pyproject.toml README.md LICENSE ./
 COPY app ./app
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir --upgrade pip==26.2.1 setuptools==83.0.0 && \
+    pip install --no-cache-dir .
 
 COPY policy.yaml .env.example ./
 
@@ -16,5 +17,10 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
 
 VOLUME /data
 EXPOSE 8000
+
+RUN useradd -r -u 1001 -g root appuser && \
+    mkdir -p /data && chown appuser /data
+
+USER appuser
 
 CMD ["python", "-m", "app"]
