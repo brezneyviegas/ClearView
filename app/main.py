@@ -13,6 +13,8 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
+import secrets
+
 import litellm
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
@@ -298,7 +300,7 @@ def _admin_auth(request: Request) -> None:
     if not auth.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = auth.split(" ", 1)[1].strip()
-    if token != expected:
+    if not secrets.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="invalid admin token")
 
 
