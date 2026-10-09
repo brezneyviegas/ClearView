@@ -5,7 +5,9 @@ WORKDIR /app
 # Install deps first for layer caching.
 COPY pyproject.toml README.md LICENSE ./
 COPY app ./app
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . \
+    && useradd -r -u 1001 -s /bin/false clearview \
+    && mkdir -p /data && chown clearview /data
 
 COPY policy.yaml .env.example ./
 
@@ -17,4 +19,5 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
 VOLUME /data
 EXPOSE 8000
 
+USER clearview
 CMD ["python", "-m", "app"]
