@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -298,7 +299,7 @@ def _admin_auth(request: Request) -> None:
     if not auth.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = auth.split(" ", 1)[1].strip()
-    if token != expected:
+    if not secrets.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="invalid admin token")
 
 
@@ -321,7 +322,7 @@ def _client_key_allowed(request: Request) -> None:
     cookie = request.cookies.get("cv_session", "")
     if cookie.startswith("cv_team_"):
         return  # /chat UI logs in via cookie, not a client key
-    if cand in allowed:
+    if cand and any([secrets.compare_digest(cand, k) for k in allowed]):
         return
     raise HTTPException(status_code=401, detail="invalid or missing client key")
 
