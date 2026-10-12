@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -298,7 +299,7 @@ def _admin_auth(request: Request) -> None:
     if not auth.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = auth.split(" ", 1)[1].strip()
-    if token != expected:
+    if not secrets.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="invalid admin token")
 
 
@@ -2536,7 +2537,8 @@ def _prom_escape_label(v: str) -> str:
 
 
 @app.get("/metrics", response_class=PlainTextResponse)
-async def metrics() -> PlainTextResponse:
+async def metrics(request: Request) -> PlainTextResponse:
+    _admin_auth(request)
     snap = telemetry.metrics_snapshot()
     lines: list[str] = []
 
