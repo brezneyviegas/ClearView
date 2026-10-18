@@ -1,6 +1,7 @@
 """SQLite telemetry. One row per upstream call."""
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import time
 import uuid
@@ -484,7 +485,8 @@ def metrics_snapshot() -> dict:
         if status.startswith("error"):
             status = "error"
         tier = r["picked_tier"] or "unknown"
-        team = r["team_id"] or "anon"
+        raw_team = r["team_id"] or ""
+        team = hashlib.sha256(raw_team.encode()).hexdigest()[:8] if raw_team else "anon"
         key = (tier, provider, status, team)
         buckets[key] = buckets.get(key, 0) + int(r["n"] or 0)
 
