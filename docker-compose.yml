@@ -19,7 +19,7 @@ services:
     image: ollama/ollama
     profiles: ["local"]
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
     volumes:
       - ollama-models:/root/.ollama
 
