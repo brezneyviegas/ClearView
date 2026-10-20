@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -298,7 +299,7 @@ def _admin_auth(request: Request) -> None:
     if not auth.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = auth.split(" ", 1)[1].strip()
-    if token != expected:
+    if not secrets.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="invalid admin token")
 
 
@@ -2648,10 +2649,12 @@ async def chat_login(request: Request) -> JSONResponse:
         raise HTTPException(status_code=401, detail="unknown or disabled team")
     resp = JSONResponse({"ok": True, "team_name": t.name})
     # 30-day cookie. HttpOnly so JS can't read it. SameSite=Lax for fetch posts.
+    secure_cookies = os.environ.get("CLEARVIEW_SECURE_COOKIES", "0").strip() == "1"
     resp.set_cookie(
         "cv_session", token,
         max_age=60 * 60 * 24 * 30,
         httponly=True, samesite="lax", path="/",
+        secure=secure_cookies,
     )
     return resp
 
