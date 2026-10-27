@@ -5,7 +5,8 @@ WORKDIR /app
 # Install deps first for layer caching.
 COPY pyproject.toml README.md LICENSE ./
 COPY app ./app
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . \
+    && adduser --disabled-password --gecos "" appuser
 
 COPY policy.yaml .env.example ./
 
@@ -14,7 +15,9 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
     CLEARVIEW_DB_PATH=/data/clearview.db \
     CLEARVIEW_POLICY_PATH=/app/policy.yaml
 
+RUN mkdir -p /data && chown appuser /data
 VOLUME /data
 EXPOSE 8000
 
+USER appuser
 CMD ["python", "-m", "app"]
