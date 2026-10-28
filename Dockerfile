@@ -14,6 +14,9 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
     CLEARVIEW_DB_PATH=/data/clearview.db \
     CLEARVIEW_POLICY_PATH=/app/policy.yaml
 
+RUN useradd --system --no-create-home clearview && chown clearview /data 2>/dev/null || true
+USER clearview
+
 VOLUME /data
 EXPOSE 8000
 
