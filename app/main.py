@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -298,7 +299,7 @@ def _admin_auth(request: Request) -> None:
     if not auth.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = auth.split(" ", 1)[1].strip()
-    if token != expected:
+    if not hmac.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="invalid admin token")
 
 
