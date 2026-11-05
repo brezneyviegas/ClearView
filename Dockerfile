@@ -14,7 +14,11 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
     CLEARVIEW_DB_PATH=/data/clearview.db \
     CLEARVIEW_POLICY_PATH=/app/policy.yaml
 
+RUN mkdir -p /data && adduser --system --no-create-home --group clearview && chown clearview:clearview /data
+
 VOLUME /data
 EXPOSE 8000
+
+USER clearview
 
 CMD ["python", "-m", "app"]
