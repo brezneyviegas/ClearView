@@ -14,6 +14,10 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
     CLEARVIEW_DB_PATH=/data/clearview.db \
     CLEARVIEW_POLICY_PATH=/app/policy.yaml
 
+RUN mkdir -p /data && chown nobody:nogroup /data
+
+USER nobody
+
 VOLUME /data
 EXPOSE 8000
 
