@@ -9,6 +9,11 @@ RUN pip install --no-cache-dir .
 
 COPY policy.yaml .env.example ./
 
+RUN useradd --system --no-create-home appuser \
+    && mkdir -p /data && chown appuser /data
+
+USER appuser
+
 ENV CLEARVIEW_HOST=0.0.0.0 \
     CLEARVIEW_PORT=8000 \
     CLEARVIEW_DB_PATH=/data/clearview.db \
