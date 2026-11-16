@@ -17,4 +17,7 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
 VOLUME /data
 EXPOSE 8000
 
+RUN chown -R nobody:nogroup /data 2>/dev/null || true
+USER nobody
+
 CMD ["python", "-m", "app"]
