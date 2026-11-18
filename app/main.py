@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import random
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -298,7 +299,7 @@ def _admin_auth(request: Request) -> None:
     if not auth.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="missing bearer token")
     token = auth.split(" ", 1)[1].strip()
-    if token != expected:
+    if not secrets.compare_digest(token, expected):
         raise HTTPException(status_code=401, detail="invalid admin token")
 
 
@@ -2651,7 +2652,7 @@ async def chat_login(request: Request) -> JSONResponse:
     resp.set_cookie(
         "cv_session", token,
         max_age=60 * 60 * 24 * 30,
-        httponly=True, samesite="lax", path="/",
+        httponly=True, samesite="lax", path="/", secure=True,
     )
     return resp
 
