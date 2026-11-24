@@ -14,6 +14,9 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
     CLEARVIEW_DB_PATH=/data/clearview.db \
     CLEARVIEW_POLICY_PATH=/app/policy.yaml
 
+RUN useradd -r -u 1001 -s /bin/false appuser && mkdir -p /data && chown appuser /data
+USER appuser
+
 VOLUME /data
 EXPOSE 8000
 
