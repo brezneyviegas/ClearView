@@ -17,4 +17,8 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
 VOLUME /data
 EXPOSE 8000
 
+RUN useradd --uid 1001 --no-create-home --shell /bin/false appuser \
+    && chown -R appuser /data || true
+USER appuser
+
 CMD ["python", "-m", "app"]
