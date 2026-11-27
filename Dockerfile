@@ -9,6 +9,8 @@ RUN pip install --no-cache-dir .
 
 COPY policy.yaml .env.example ./
 
+RUN useradd -r -u 1000 -m clearview
+
 ENV CLEARVIEW_HOST=0.0.0.0 \
     CLEARVIEW_PORT=8000 \
     CLEARVIEW_DB_PATH=/data/clearview.db \
@@ -17,4 +19,5 @@ ENV CLEARVIEW_HOST=0.0.0.0 \
 VOLUME /data
 EXPOSE 8000
 
+USER clearview
 CMD ["python", "-m", "app"]
